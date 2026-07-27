@@ -1089,6 +1089,7 @@ class ContainerManager:
         if DOCKER_AVAILABLE:
             try:
                 self.docker_client = docker.from_env()
+                # اختبار الاتصال
                 self.docker_client.ping()
                 logger.info("✅ تم الاتصال بـ Docker بنجاح.")
             except Exception as e:
@@ -1112,6 +1113,7 @@ class ContainerManager:
         """إنشاء مجلد المستخدم إذا لم يكن موجوداً."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
+        # إنشاء المجلدات الفرعية
         for sub in ["files", "logs"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
 
@@ -1125,14 +1127,15 @@ class ContainerManager:
             for f in files:
                 path = os.path.join(root, f)
                 total_bytes += os.path.getsize(path)
-        return total_bytes // (1024 * 1024)
+        return total_bytes // (1024 * 1024)  # تحويل إلى ميجابايت
 
     def enforce_storage_limit(self, user_id: str, additional_size_mb: int) -> bool:
         current = self.get_user_storage_usage(user_id)
-        return (current + additional_size_mb) <= MAX_STORAGE_MB
+        if current + additional_size_mb > MAX_STORAGE_MB:
+            return False
+        return True
 
-    def ensure_container(self, user_id: str):
-        """التأكد من وجود حاوية للمستخدم، وإنشاؤها إذا لزم الأمر."""
+    def ensure_container(self, user_id: str) -> Optional[str]:
         if not self.is_available():
             logger.warning("Docker غير متوفر، لا يمكن إنشاء حاوية.")
             return None
@@ -1148,14 +1151,13 @@ class ContainerManager:
             else:
                 container.remove(force=True)
                 return self._create_container(user_id)
-        except docker.errors.NotFound:
+        except NotFound:
             return self._create_container(user_id)
         except Exception as e:
             logger.error(f"خطأ في التأكد من حاوية المستخدم {user_id}: {e}")
             return None
 
-    def _create_container(self, user_id: str):
-        """إنشاء حاوية جديدة للمستخدم."""
+    def _create_container(self, user_id: str) -> Optional[str]:
         if not self.is_available():
             return None
 
@@ -1200,25 +1202,26 @@ class ContainerManager:
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            import tarfile
-            import io
-            tar_data = io.BytesIO()
-            with tarfile.open(fileobj=tar_data, mode='w') as tar:
-                arcname = os.path.basename(container_path)
-                tar.add(local_path, arcname=arcname)
-            tar_data.seek(0)
-            success = container.put_archive(os.path.dirname(container_path), tar_data)
-            if success:
-                logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
-                return True
-            else:
-                logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
-                return False
+            with open(local_path, 'rb') as f:
+                import tarfile
+                import io
+                tar_data = io.BytesIO()
+                with tarfile.open(fileobj=tar_data, mode='w') as tar:
+                    arcname = os.path.basename(container_path)
+                    tar.add(local_path, arcname=arcname)
+                tar_data.seek(0)
+                success = container.put_archive(os.path.dirname(container_path), tar_data)
+                if success:
+                    logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
+                    return True
+                else:
+                    logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
+                    return False
         except Exception as e:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app"):
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
@@ -1240,19 +1243,21 @@ class ContainerManager:
                     detach=False,
                     stream=False
                 )
-                return result.output.decode('utf-8').strip()
+                output = result.output.decode('utf-8').strip()
+                return output
         except Exception as e:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    def get_process_pid(self, user_id: str, process_pattern: str):
+    def get_process_pid(self, user_id: str, process_pattern: str) -> Optional[int]:
         if not self.is_available():
             return None
         cmd = f"pgrep -f '{process_pattern}'"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output:
             try:
-                return int(output.split()[0])
+                pid = int(output.split()[0])
+                return pid
             except (ValueError, IndexError):
                 pass
         return None
@@ -1294,7 +1299,6 @@ class ContainerManager:
         else:
             logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
             return False
-
 # ===================== معالجات البوت =====================
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
