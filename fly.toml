@@ -4,10 +4,27 @@ primary_region = "cdg"
 
 [build]
   dockerfile = "Dockerfile"
-[mounts]
+
+# تعريف نقاط التثبيت (mounts)
+[[mounts]]
   source = "data"
   destination = "/data"
-  
+
+# ربط مأخذ Docker من المضيف إلى الحاوية
+[[mounts]]
+  source = "docker_socket"
+  destination = "/var/run/docker.sock"
+
+# مجلد دائم لتخزين بيانات المستخدمين (عزل الحاويات)
+[[mounts]]
+  source = "user_data"
+  destination = "/app/user_data"
+
+# متغيرات البيئة
+[env]
+  DOCKER_HOST = "unix:///var/run/docker.sock"
+  USER_DATA_DIR = "/app/user_data"
+
 [http_service]
   internal_port = 8085
   force_https = true
