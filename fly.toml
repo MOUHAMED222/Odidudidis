@@ -33,6 +33,6 @@ primary_region = "cdg"
   min_machines_running = 1
 
 [[vm]]
-  cpu_kind = "shared"
-  cpus = 1
-  memory_mb = 2048
+  cpu_kind = "performance"   # تم التغيير من shared إلى performance لدعم الموارد الكبيرة
+  cpus = 16                  # 16 وحدة معالجة مركزية
+  memory_mb = 131072         # 128 جيجابايت = 128 * 1024 = 131072 ميجابايت
