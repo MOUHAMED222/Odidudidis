@@ -1208,9 +1208,11 @@ class ContainerManager:
             container.start()
             # تثبيت procps لتوفير pgrep و pkill
             try:
-                exec_id = self.docker_client.api.exec_create(container.id, "apt-get update && apt-get install -y procps -qq")
+                exec_id = self.docker_client.api.exec_create(container.id, "apt-get update -qq && apt-get install -y procps -qq")
                 self.docker_client.api.exec_start(exec_id, detach=True)
-                time.sleep(5)  # انتظار التثبيت
+                # انتظار انتهاء التثبيت
+                time.sleep(10)
+                logger.info(f"تم تثبيت procps في الحاوية {container_name}")
             except Exception as e:
                 logger.warning(f"فشل تثبيت procps في الحاوية: {e}")
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
@@ -1290,7 +1292,7 @@ class ContainerManager:
         """
         if not self.is_available():
             return None
-        # استخدام pgrep -f داخل الحاوية (الآن متوفر بعد تثبيت procps)
+        # محاولة استخدام pgrep أولاً (إذا كان متوفراً)
         cmd = f"pgrep -f '{process_pattern}'"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output:
@@ -1298,6 +1300,15 @@ class ContainerManager:
                 pid = int(output.split()[0])
                 return pid
             except (ValueError, IndexError):
+                pass
+        # في حال فشل pgrep، نستخدم ps aux | grep كبديل
+        cmd_alt = f"ps aux | grep -E '{process_pattern}' | grep -v grep | awk '{{print $2}}' | head -n 1"
+        output_alt = self.run_command_in_container(user_id, cmd_alt, detach=False)
+        if output_alt:
+            try:
+                pid = int(output_alt.strip())
+                return pid
+            except (ValueError):
                 pass
         return None
 
@@ -1442,7 +1453,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # الحصول على PID للعملية (الآن pgrep متوفر)
+    # الحصول على PID للعملية (الآن pgrep أو ps بديل)
     pid = container_manager.get_process_pid(user_id, container_filename)
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
