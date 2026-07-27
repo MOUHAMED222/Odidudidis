@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # ===================== الإعدادات العامة =====================
 import os
-
+USER_DATA_DIR = os.path.abspath("user_data")  # تحويله إلى مسار مطلق
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 BOT_USERNAME = os.environ["BOT_USERNAME"]
@@ -1102,9 +1102,8 @@ class ContainerManager:
         return self.docker_client is not None
 
     def get_user_dir(self, user_id: str) -> str:
-        """الحصول على مسار مجلد المستخدم على المضيف."""
-        return os.path.join(USER_DATA_DIR, str(user_id))
-
+    """الحصول على مسار مجلد المستخدم على المضيف (مسار مطلق)."""
+    return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
     def get_user_container_name(self, user_id: str) -> str:
         """اسم الحاوية الخاص بالمستخدم."""
         return f"user_{user_id}"
