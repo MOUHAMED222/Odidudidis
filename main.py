@@ -1089,7 +1089,6 @@ class ContainerManager:
         if DOCKER_AVAILABLE:
             try:
                 self.docker_client = docker.from_env()
-                # اختبار الاتصال
                 self.docker_client.ping()
                 logger.info("✅ تم الاتصال بـ Docker بنجاح.")
             except Exception as e:
@@ -1100,11 +1099,11 @@ class ContainerManager:
 
     def is_available(self) -> bool:
         return self.docker_client is not None
-def get_user_dir(self, user_id: str) -> str:
-    """الحصول على مسار مجلد المستخدم على المضيف (مسار مطلق)."""
-    return os.path.abspath(
-        os.path.join(USER_DATA_DIR, str(user_id))
-    )
+
+    def get_user_dir(self, user_id: str) -> str:
+        """الحصول على مسار مجلد المستخدم على المضيف (مسار مطلق)."""
+        return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
+
     def get_user_container_name(self, user_id: str) -> str:
         """اسم الحاوية الخاص بالمستخدم."""
         return f"user_{user_id}"
@@ -1113,7 +1112,6 @@ def get_user_dir(self, user_id: str) -> str:
         """إنشاء مجلد المستخدم إذا لم يكن موجوداً."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        # إنشاء المجلدات الفرعية
         for sub in ["files", "logs"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
 
@@ -1127,50 +1125,36 @@ def get_user_dir(self, user_id: str) -> str:
             for f in files:
                 path = os.path.join(root, f)
                 total_bytes += os.path.getsize(path)
-        return total_bytes // (1024 * 1024)  # تحويل إلى ميجابايت
+        return total_bytes // (1024 * 1024)
 
     def enforce_storage_limit(self, user_id: str, additional_size_mb: int) -> bool:
-        """
-        التحقق من أن إضافة ملف بحجم معين لا تتجاوز الحد الأقصى.
-        تعيد True إذا كان بالإمكان الإضافة، False إذا تجاوزت الحد.
-        """
         current = self.get_user_storage_usage(user_id)
-        if current + additional_size_mb > MAX_STORAGE_MB:
-            return False
-        return True
+        return (current + additional_size_mb) <= MAX_STORAGE_MB
 
-    def ensure_container(self, user_id: str) -> Optional[str]:
-        """
-        التأكد من وجود حاوية للمستخدم وإنشائها إذا لم تكن موجودة.
-        تعيد اسم الحاوية أو None في حالة الفشل.
-        """
+    def ensure_container(self, user_id: str):
+        """التأكد من وجود حاوية للمستخدم، وإنشاؤها إذا لزم الأمر."""
         if not self.is_available():
             logger.warning("Docker غير متوفر، لا يمكن إنشاء حاوية.")
             return None
 
         container_name = self.get_user_container_name(user_id)
         try:
-            # محاولة جلب الحاوية
             container = self.docker_client.containers.get(container_name)
             if container.status == "running":
                 return container_name
             elif container.status == "exited":
-                # إعادة تشغيلها
                 container.start()
                 return container_name
             else:
-                # حالة غير متوقعة، حذف وإعادة إنشاء
                 container.remove(force=True)
-                # إنشاء جديدة
                 return self._create_container(user_id)
-        except NotFound:
-            # الحاوية غير موجودة، إنشاؤها
+        except docker.errors.NotFound:
             return self._create_container(user_id)
         except Exception as e:
             logger.error(f"خطأ في التأكد من حاوية المستخدم {user_id}: {e}")
             return None
 
-    def _create_container(self, user_id: str) -> Optional[str]:
+    def _create_container(self, user_id: str):
         """إنشاء حاوية جديدة للمستخدم."""
         if not self.is_available():
             return None
@@ -1187,11 +1171,10 @@ def get_user_dir(self, user_id: str) -> str:
                 logger.info(f"سحب الصورة {CONTAINER_IMAGE} ...")
                 self.docker_client.images.pull(CONTAINER_IMAGE)
 
-            # إنشاء الحاوية مع مونتاج لمجلد المستخدم
             container = self.docker_client.containers.create(
                 image=CONTAINER_IMAGE,
                 name=container_name,
-                command="tail -f /dev/null",  # حاوية دائمة
+                command="tail -f /dev/null",
                 working_dir="/app",
                 volumes={
                     user_dir: {
@@ -1201,7 +1184,6 @@ def get_user_dir(self, user_id: str) -> str:
                 },
                 detach=True,
                 tty=True,
-                # تحديد موارد إضافية (اختياري)
                 mem_limit="512m",
                 memswap_limit="1g",
             )
@@ -1213,59 +1195,36 @@ def get_user_dir(self, user_id: str) -> str:
             return None
 
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
-        """
-        نسخ ملف من المضيف إلى الحاوية.
-        local_path: المسار الكامل للملف على المضيف.
-        container_path: المسار داخل الحاوية (مثل /app/files/script.py).
-        """
         if not self.is_available():
             return False
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # استخدام docker cp
-            with open(local_path, 'rb') as f:
-                # نستخدم put_archive مع tar
-                import tarfile
-                import io
-                tar_data = io.BytesIO()
-                with tarfile.open(fileobj=tar_data, mode='w') as tar:
-                    arcname = os.path.basename(container_path)
-                    tar.add(local_path, arcname=arcname)
-                tar_data.seek(0)
-                success = container.put_archive(os.path.dirname(container_path), tar_data)
-                if success:
-                    logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
-                    return True
-                else:
-                    logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
-                    return False
+            import tarfile
+            import io
+            tar_data = io.BytesIO()
+            with tarfile.open(fileobj=tar_data, mode='w') as tar:
+                arcname = os.path.basename(container_path)
+                tar.add(local_path, arcname=arcname)
+            tar_data.seek(0)
+            success = container.put_archive(os.path.dirname(container_path), tar_data)
+            if success:
+                logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
+                return True
+            else:
+                logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
+                return False
         except Exception as e:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
-        """
-        تنفيذ أمر داخل حاوية المستخدم.
-        تعيد exec_id في حالة detach=True، أو إخراج الأمر في حالة detach=False.
-        """
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app"):
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
             if detach:
-                exec_id = container.exec_run(
-                    cmd=command,
-                    workdir=workdir,
-                    detach=True,
-                    stream=False
-                )
-                # exec_id هو كائن ExecInspect؟ في الواقع exec_run يعيد استجابة، لكننا نحتاج إلى معرف التنفيذ.
-                # الطريقة: استخدام client.api.exec_create ثم exec_start
-                # لكننا نفضل استخدام exec_run مع detach=True, ثم نأخذ الـ exec_id من الاستجابة.
-                # exec_run مع detach=True يعيد (exit_code, output) لكن output فارغ.
-                # لا يعيد exec_id. لذا نستخدم api مباشرة.
                 exec_id = self.docker_client.api.exec_create(
                     container=container.id,
                     cmd=command,
@@ -1275,47 +1234,37 @@ def get_user_dir(self, user_id: str) -> str:
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
             else:
-                # انتظار النتيجة
                 result = container.exec_run(
                     cmd=command,
                     workdir=workdir,
                     detach=False,
                     stream=False
                 )
-                output = result.output.decode('utf-8').strip()
-                return output
+                return result.output.decode('utf-8').strip()
         except Exception as e:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    def get_process_pid(self, user_id: str, process_pattern: str) -> Optional[int]:
-        """
-        الحصول على PID لعملية تطابق النمط (مثل اسم الملف).
-        تعيد أول PID موجود، أو None.
-        """
+    def get_process_pid(self, user_id: str, process_pattern: str):
         if not self.is_available():
             return None
-        # استخدام pgrep -f داخل الحاوية
         cmd = f"pgrep -f '{process_pattern}'"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output:
             try:
-                pid = int(output.split()[0])
-                return pid
+                return int(output.split()[0])
             except (ValueError, IndexError):
                 pass
         return None
 
     def kill_process(self, user_id: str, pid: int) -> bool:
-        """قتل عملية داخل الحاوية بواسطة PID."""
         if not self.is_available():
             return False
         cmd = f"kill -9 {pid}"
         result = self.run_command_in_container(user_id, cmd, detach=False)
-        return result is not None  # إذا لم يحدث خطأ
+        return result is not None
 
     def is_process_running(self, user_id: str, pid: int) -> bool:
-        """التحقق من وجود عملية بواسطة PID."""
         if not self.is_available():
             return False
         cmd = f"kill -0 {pid} 2>/dev/null && echo running"
@@ -1323,32 +1272,21 @@ def get_user_dir(self, user_id: str) -> str:
         return output == "running"
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
-        """الحصول على مسار ملف السجل للملف المعطى على المضيف."""
         return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت متطلبات الملف داخل حاوية المستخدم.
-        تبحث عن requirements.txt في نفس مجلد الملف وتثبته داخل الحاوية.
-        تعيد True إذا نجحت أو لا يوجد متطلبات، False في حالة خطأ.
-        """
         if not self.is_available():
             return False
         base_dir = os.path.dirname(file_path)
         req_file = os.path.join(base_dir, "requirements.txt")
         if not os.path.exists(req_file):
-            # لا يوجد متطلبات، تخطي
             return True
 
-        # نسخ ملف المتطلبات إلى الحاوية
-        container_path = f"/app/files/requirements.txt"
+        container_path = "/app/files/requirements.txt"
         if not self.copy_file_to_container(user_id, req_file, container_path):
-            logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
             return False
 
-        # تشغيل pip install
-        cmd = f"pip install -r /app/files/requirements.txt"
-        # نستخدم detach=False لانتظار النتيجة
+        cmd = "pip install -r /app/files/requirements.txt"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output is not None:
             logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output}")
@@ -1356,236 +1294,6 @@ def get_user_dir(self, user_id: str) -> str:
         else:
             logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
             return False
-
-
-# إنشاء مدير الحاويات
-container_manager = ContainerManager()
-
-# ===================== دوال استضافة الملفات (معدلة للعمل بالحاويات) =====================
-
-def start_hosted_bot(fid):
-    f = db["files"].get(fid)
-    if not f or fid in running_processes:
-        return
-
-    user_id = f["owner"]
-    original_path = f["path"]
-    if not os.path.exists(original_path):
-        logger.error(f"ملف البوت غير موجود: {original_path}")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    # التأكد من وجود حاوية للمستخدم
-    if not container_manager.is_available():
-        logger.error("نظام الحاويات غير متاح، لا يمكن تشغيل البوت.")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    container_name = container_manager.ensure_container(user_id)
-    if not container_name:
-        logger.error(f"فشل إنشاء حاوية للمستخدم {user_id}")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    # فك تشفير الملف إذا كان مشفراً
-    if original_path.endswith(".enc"):
-        temp_path = decrypt_file_to_temp(original_path)
-    else:
-        temp_path = original_path
-
-    # التحقق من المساحة المتاحة قبل نسخ الملف
-    file_size_mb = os.path.getsize(temp_path) // (1024 * 1024)
-    if not container_manager.enforce_storage_limit(user_id, file_size_mb):
-        logger.error(f"مساحة المستخدم {user_id} تجاوزت الحد الأقصى ({MAX_STORAGE_MB} ميجابايت)")
-        f["status"] = "stopped"
-        save_db()
-        # إشعار المستخدم
-        try:
-            bot.send_message(
-                int(user_id),
-                f"❌ لا يمكن تشغيل البوت: تجاوزت الحد الأقصى للمساحة ({MAX_STORAGE_MB} ميجابايت). يرجى حذف بعض الملفات."
-            )
-        except:
-            pass
-        return
-
-    # نسخ الملف إلى الحاوية
-    container_filename = f"{fid}_{f['filename']}"
-    container_path = f"/app/files/{container_filename}"
-    if not container_manager.copy_file_to_container(user_id, temp_path, container_path):
-        logger.error(f"فشل نسخ الملف إلى حاوية المستخدم {user_id}")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    # تثبيت المتطلبات (إذا وجدت)
-    if not container_manager.install_requirements_in_container(user_id, temp_path):
-        logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
-        f["status"] = "stopped"
-        save_db()
-        # إشعار المستخدم
-        try:
-            bot.send_message(
-                int(user_id),
-                f"❌ فشل تثبيت المتطلبات المطلوبة لتشغيل بوتك. تأكد من وجود ملف requirements.txt صحيح."
-            )
-        except:
-            pass
-        return
-
-    # تحديد مسار سجل الإخراج
-    log_file = container_manager.get_log_path(user_id, fid)
-    # تشغيل السكربت داخل الحاوية مع توجيه المخرجات
-    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1"
-    exec_id = container_manager.run_command_in_container(user_id, cmd, detach=True)
-    if not exec_id:
-        logger.error(f"فشل تشغيل البوت {fid} في الحاوية")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    # الحصول على PID للعملية
-    pid = container_manager.get_process_pid(user_id, container_filename)
-    if not pid:
-        logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
-        # نتحقق من وجود الملف السجل
-        time.sleep(2)
-        if os.path.exists(log_file):
-            with open(log_file, 'r') as lf:
-                content = lf.read()
-                if "Error" in content or "Exception" in content:
-                    logger.error(f"البوت {fid} انتهى بخطأ. السجل: {content[:200]}")
-                    f["status"] = "stopped"
-                    save_db()
-                    # إشعار المستخدم
-                    try:
-                        bot.send_message(
-                            int(user_id),
-                            f"❌ حدث خطأ أثناء تشغيل بوتك. يرجى مراجعة السجل: /file_log_{fid}"
-                        )
-                    except:
-                        pass
-                    return
-        # إذا لم نجد PID، نعتبر أنه توقف
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    # تخزين معلومات العملية
-    running_processes[fid] = {
-        "container_name": container_name,
-        "pid": pid,
-        "log_path": log_file,
-        "file_path": container_path,
-        "container_filename": container_filename,
-        "exec_id": exec_id
-    }
-
-    f["status"] = "running"
-    f["pid"] = pid
-    f["last_bill"] = now_iso()
-    f["last_started"] = now_iso()
-    save_db()
-    logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid})")
-
-
-def stop_hosted_bot(fid):
-    f = db["files"].get(fid)
-    proc_info = running_processes.pop(fid, None)
-    if proc_info:
-        container_name = proc_info.get("container_name")
-        pid = proc_info.get("pid")
-        if container_name and pid and container_manager.is_available():
-            # قتل العملية داخل الحاوية
-            user_id = f["owner"] if f else None
-            if user_id:
-                container_manager.kill_process(user_id, pid)
-                logger.info(f"تم إيقاف البوت {fid} (PID: {pid}) في الحاوية {container_name}")
-            else:
-                # محاولة العثور على المستخدم من الملف
-                if f:
-                    user_id = f["owner"]
-                    container_manager.kill_process(user_id, pid)
-        else:
-            logger.warning(f"لم يتمكن من إيقاف البوت {fid}: معلومات غير كافية.")
-    if f:
-        f["status"] = "stopped"
-        f["pid"] = None
-        save_db()
-
-
-def process_billing(fid, f):
-    if not f:
-        return
-    last_bill = f.get("last_bill")
-    if not last_bill:
-        f["last_bill"] = now_iso()
-        save_db()
-        return
-
-    try:
-        if datetime.now() - datetime.fromisoformat(last_bill) >= timedelta(days=1):
-            owner = f["owner"]
-            cost = db["settings"]["daily_cost"]
-            if get_points(owner) >= cost:
-                add_points(owner, -cost)
-                f["daily_billed"] = f.get("daily_billed", 0) + 1
-                f["last_bill"] = now_iso()
-                save_db()
-                logger.info(f"تم خصم {cost} نقطة من المستخدم {owner} لتشغيل البوت {fid}")
-            else:
-                stop_hosted_bot(fid)
-                try:
-                    send_user_card(
-                        int(owner),
-                        owner,
-                        (
-                            f"⏹️ تم إيقاف بوتك بنجاح.\n"
-                            f"🤖 الاسم: {esc(f['filename'])}\n"
-                            "💎 السبب: نفاد الرصيد المخصص للتشغيل.\n"
-                            "🛒 اشحن نقاطك من المتجر لإعادة تشغيله."
-                        ),
-                    )
-                except Exception as e:
-                    logger.error(f"فشل إرسال إشعار إيقاف البوت للمستخدم {owner}: {e}")
-    except ValueError:
-        f["last_bill"] = now_iso()
-        save_db()
-        logger.warning(f"تم إعادة تعيين last_bill للبوت {fid} بسبب خطأ في التنسيق.")
-
-
-def billing_loop():
-    while True:
-        try:
-            time.sleep(60)
-            for fid, proc_info in list(running_processes.items()):
-                f = db["files"].get(fid)
-                if not f:
-                    continue
-                # التحقق من استمرارية العملية داخل الحاوية
-                user_id = f["owner"]
-                pid = proc_info.get("pid")
-                if pid and container_manager.is_available():
-                    if not container_manager.is_process_running(user_id, pid):
-                        f["status"] = "stopped"
-                        running_processes.pop(fid, None)
-                        save_db()
-                        logger.warning(f"توقف البوت {fid} بشكل غير متوقع (PID: {pid})")
-                        continue
-                else:
-                    # إذا لم نتمكن من التحقق، نعتبره متوقف
-                    f["status"] = "stopped"
-                    running_processes.pop(fid, None)
-                    save_db()
-                    continue
-
-                # تطبيق الفوترة
-                process_billing(fid, f)
-        except Exception as e:
-            logger.error(f"خطأ في حلقة الفوترة: {e}")
 
 # ===================== معالجات البوت =====================
 @bot.message_handler(commands=["start"])
