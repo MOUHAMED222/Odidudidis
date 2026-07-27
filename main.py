@@ -1206,6 +1206,13 @@ class ContainerManager:
                 memswap_limit="1g",
             )
             container.start()
+            # تثبيت procps لتوفير pgrep و pkill
+            try:
+                exec_id = self.docker_client.api.exec_create(container.id, "apt-get update && apt-get install -y procps -qq")
+                self.docker_client.api.exec_start(exec_id, detach=True)
+                time.sleep(5)  # انتظار التثبيت
+            except Exception as e:
+                logger.warning(f"فشل تثبيت procps في الحاوية: {e}")
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
             return container_name
         except Exception as e:
@@ -1283,7 +1290,7 @@ class ContainerManager:
         """
         if not self.is_available():
             return None
-        # استخدام pgrep -f داخل الحاوية
+        # استخدام pgrep -f داخل الحاوية (الآن متوفر بعد تثبيت procps)
         cmd = f"pgrep -f '{process_pattern}'"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output:
@@ -1435,7 +1442,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # الحصول على PID للعملية
+    # الحصول على PID للعملية (الآن pgrep متوفر)
     pid = container_manager.get_process_pid(user_id, container_filename)
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
