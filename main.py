@@ -1100,10 +1100,11 @@ class ContainerManager:
 
     def is_available(self) -> bool:
         return self.docker_client is not None
-
-    def get_user_dir(self, user_id: str) -> str:
+def get_user_dir(self, user_id: str) -> str:
     """الحصول على مسار مجلد المستخدم على المضيف (مسار مطلق)."""
-    return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
+    return os.path.abspath(
+        os.path.join(USER_DATA_DIR, str(user_id))
+    )
     def get_user_container_name(self, user_id: str) -> str:
         """اسم الحاوية الخاص بالمستخدم."""
         return f"user_{user_id}"
