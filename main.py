@@ -1259,7 +1259,6 @@ class ContainerManager:
                     container=container.id,
                     cmd=command,
                     workdir=workdir,
-                    detach=True
                 )['Id']
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
@@ -1575,6 +1574,45 @@ def billing_loop():
                 process_billing(fid, f)
         except Exception as e:
             logger.error(f"خطأ في حلقة الفوترة: {e}")
+
+
+# ===================== مراقبة المساحة الدورية =====================
+STORAGE_MONITOR_INTERVAL = 300  # كل 5 دقائق
+
+def monitor_storage_loop():
+    """مراقبة استخدام المساحة لكل مستخدم وإيقاف البوتات التي تتجاوز الحد"""
+    while True:
+        try:
+            time.sleep(STORAGE_MONITOR_INTERVAL)
+            logger.info("بدء فحص المساحة للمستخدمين...")
+
+            # تجميع المستخدمين النشطين
+            users_to_check = set()
+            for fid, f in db["files"].items():
+                if f.get("status") == "running" or f.get("status") == "approved":
+                    users_to_check.add(f["owner"])
+
+            for uid in users_to_check:
+                usage = container_manager.get_user_storage_usage(uid)
+                if usage > MAX_STORAGE_MB:
+                    logger.warning(f"المستخدم {uid} تجاوز حد المساحة: {usage} ميجابايت / {MAX_STORAGE_MB} ميجابايت")
+                    # إيقاف جميع البوتات الخاصة بهذا المستخدم
+                    for fid, f in list(db["files"].items()):
+                        if f["owner"] == uid and f.get("status") == "running":
+                            stop_hosted_bot(fid)
+                            logger.info(f"تم إيقاف البوت {fid} للمستخدم {uid} بسبب تجاوز المساحة")
+                            try:
+                                bot.send_message(
+                                    int(uid),
+                                    f"⛔ تم إيقاف بوتك `{f['filename']}` تلقائياً بسبب تجاوز حد المساحة {MAX_STORAGE_MB} ميجابايت.\n"
+                                    f"المساحة المستخدمة حالياً: {usage} ميجابايت.\n"
+                                    "يرجى حذف بعض الملفات غير الضرورية وإعادة تشغيل البوت يدوياً."
+                                )
+                            except Exception as e:
+                                logger.error(f"فشل إرسال إشعار للمستخدم {uid}: {e}")
+
+        except Exception as e:
+            logger.error(f"خطأ في حلقة مراقبة المساحة: {e}")
 
 # ===================== معالجات البوت =====================
 @bot.message_handler(commands=["start"])
@@ -3199,5 +3237,6 @@ if __name__ == "__main__":
             start_hosted_bot(fid)
     threading.Thread(target=billing_loop, daemon=True).start()
     threading.Thread(target=auto_backup, daemon=True).start()
+    threading.Thread(target=monitor_storage_loop, daemon=True).start()
     logger.info("🤖 البوت شغال...")
     bot.infinity_polling(skip_pending=True)
