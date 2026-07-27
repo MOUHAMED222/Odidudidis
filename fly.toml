@@ -1,0 +1,18 @@
+app = "odidudidis"
+
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8085
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "performance"
+  cpus = 16
+  memory_mb = 2048
