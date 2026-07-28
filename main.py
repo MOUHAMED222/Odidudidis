@@ -1159,10 +1159,17 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
+                read_only=True,                   # نظام الملفات الجذر للقراءة فقط
+                tmpfs={
+                    "/tmp": "rw,noexec,nosuid,size=64M"
+                },
                 detach=True,
                 tty=True,
                 mem_limit="512m",
                 memswap_limit="1g",
+                security_opt=["no-new-privileges"],
+                cap_drop=["ALL"],
+                cap_add=["SETUID", "SETGID"],
             )
             container.start()
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
@@ -1231,13 +1238,11 @@ class ContainerManager:
         if not self.is_available():
             return False
         
-        # استخراج المكتبات المستوردة من الملف
         imports = get_imports(file_path)
         if not imports:
             logger.info("لا توجد مكتبات مستوردة من الملف.")
             return True
         
-        # تصفية المكتبات المدمجة
         external_packages = []
         for pkg in imports:
             if pkg not in BUILTIN_MODULES:
@@ -1252,7 +1257,6 @@ class ContainerManager:
         failed = []
         for pkg in external_packages:
             install_name = PACKAGE_ALIASES.get(pkg, pkg)
-            # التحقق من أن المكتبة غير مثبتة مسبقاً
             check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
             check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
             if check_output and "installed" in check_output:
@@ -1440,7 +1444,6 @@ def start_hosted_bot(fid):
     if not req_installed:
         logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
     
-    # دائماً نحاول تثبيت المكتبات المستوردة (للتأكد من تغطية جميع المكتبات)
     imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
     
     if not req_installed and not imported_installed:
