@@ -1,3 +1,8 @@
+# fly.toml app configuration file generated for odidudidis on 2026-07-28T09:02:27Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
 app = 'odidudidis'
 primary_region = 'lax'
 
@@ -8,7 +13,6 @@ primary_region = 'lax'
   DOCKER_HOST = 'unix:///var/run/docker.sock'
   USER_DATA_DIR = '/app/user_data'
 
-# مجلد واحد فقط - سيتم استخدامه لتخزين بيانات المستخدمين والحاويات
 [[mounts]]
   source = 'user_data'
   destination = '/app/user_data'
@@ -24,4 +28,3 @@ primary_region = 'lax'
   cpu_kind = 'performance'
   cpus = 16
   memory_mb = 131072
-  privileged = true   # ضروري لتشغيل Docker daemon داخل الحاوية
