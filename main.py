@@ -945,6 +945,8 @@ PACKAGE_ALIASES = {
     "dateutil": "python-dateutil",
     "yaml": "pyyaml",
     "PIL": "pillow",
+    "telegram": "python-telegram-bot",
+    "telegram.ext": "python-telegram-bot",
 }
 
 def get_imports(file_path):
@@ -1220,11 +1222,85 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    # ---- الطريقة الجديدة الموثوقة للحصول على PID مع دعم الأسماء الخاصة ----
+    # ---- تثبيت المكتبات المستوردة من الملف مباشرة داخل الحاوية ----
+    def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
+        """
+        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
+        تستخدم get_imports لاستخراج المكتبات وتثبيتها عبر pip.
+        """
+        if not self.is_available():
+            return False
+        
+        # استخراج المكتبات المستوردة من الملف
+        imports = get_imports(file_path)
+        if not imports:
+            logger.info("لا توجد مكتبات مستوردة من الملف.")
+            return True
+        
+        # تصفية المكتبات المدمجة
+        external_packages = []
+        for pkg in imports:
+            if pkg not in BUILTIN_MODULES:
+                external_packages.append(pkg)
+        
+        if not external_packages:
+            logger.info("جميع المكتبات المستوردة هي مكتبات مدمجة، لا حاجة للتثبيت.")
+            return True
+        
+        logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
+        
+        failed = []
+        for pkg in external_packages:
+            install_name = PACKAGE_ALIASES.get(pkg, pkg)
+            # التحقق من أن المكتبة غير مثبتة مسبقاً
+            check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+            check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
+            if check_output and "installed" in check_output:
+                logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
+                continue
+            
+            logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
+            cmd = f"pip install {install_name}"
+            output = self.run_command_in_container(user_id, cmd, detach=False)
+            if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
+                logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
+            else:
+                logger.error(f"❌ فشل تثبيت {install_name}: {output}")
+                failed.append(install_name)
+        
+        if failed:
+            logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
+            return False
+        return True
+
+    def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
+        """
+        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية.
+        """
+        if not self.is_available():
+            return False
+        base_dir = os.path.dirname(file_path)
+        req_file = os.path.join(base_dir, "requirements.txt")
+        if not os.path.exists(req_file):
+            return True
+
+        container_path = f"/app/files/requirements.txt"
+        if not self.copy_file_to_container(user_id, req_file, container_path):
+            logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
+            return False
+
+        cmd = f"pip install -r /app/files/requirements.txt"
+        output = self.run_command_in_container(user_id, cmd, detach=False)
+        if output is not None:
+            logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output[:200]}")
+            return True
+        else:
+            logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
+            return False
+
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
         تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
-        تعيد (PID, log_content) حيث log_content أول 500 حرف من السجل.
         """
         if not self.is_available():
             return None, None
@@ -1247,7 +1323,7 @@ class ContainerManager:
                 logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
                 return None, None
 
-            time.sleep(2)  # انتظار لكتابة الملفات
+            time.sleep(2)
 
             pid_result = container.exec_run(
                 cmd=["cat", pid_file],
@@ -1265,7 +1341,6 @@ class ContainerManager:
                 return None, None
             pid = int(pid_str)
 
-            # قراءة أول 500 حرف من السجل للتشخيص
             log_result = container.exec_run(
                 cmd=["head", "-c", "500", log_file],
                 workdir=workdir,
@@ -1301,28 +1376,6 @@ class ContainerManager:
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
         return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
-
-    def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
-        if not self.is_available():
-            return False
-        base_dir = os.path.dirname(file_path)
-        req_file = os.path.join(base_dir, "requirements.txt")
-        if not os.path.exists(req_file):
-            return True
-
-        container_path = f"/app/files/requirements.txt"
-        if not self.copy_file_to_container(user_id, req_file, container_path):
-            logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
-            return False
-
-        cmd = f"pip install -r /app/files/requirements.txt"
-        output = self.run_command_in_container(user_id, cmd, detach=False)
-        if output is not None:
-            logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output}")
-            return True
-        else:
-            logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
-            return False
 
 
 container_manager = ContainerManager()
@@ -1382,14 +1435,22 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    if not container_manager.install_requirements_in_container(user_id, temp_path):
-        logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
+    # ===== تثبيت المتطلبات: محاولة requirements.txt أولاً، ثم المكتبات المستوردة =====
+    req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
+    if not req_installed:
+        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
+    
+    # دائماً نحاول تثبيت المكتبات المستوردة (للتأكد من تغطية جميع المكتبات)
+    imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
+    
+    if not req_installed and not imported_installed:
+        logger.error(f"فشل تثبيت جميع المتطلبات للمستخدم {user_id}")
         f["status"] = "stopped"
         save_db()
         try:
             bot.send_message(
                 int(user_id),
-                f"❌ فشل تثبيت المتطلبات المطلوبة لتشغيل بوتك. تأكد من وجود ملف requirements.txt صحيح."
+                f"❌ فشل تثبيت المتطلبات المطلوبة لتشغيل بوتك. تأكد من وجود ملف requirements.txt صحيح أو أن جميع المكتبات المطلوبة متاحة."
             )
         except:
             pass
@@ -1419,11 +1480,9 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # انتظار 3 ثوانٍ للتأكد من استمرارية العملية
     time.sleep(3)
     if not container_manager.is_process_running(user_id, pid):
         logger.warning(f"البوت {fid} انتهى فوراً (PID {pid})")
-        # قراءة السجل بالكامل لإظهار الأخطاء
         log_path = container_manager.get_log_path(user_id, fid)
         if os.path.exists(log_path):
             with open(log_path, 'r') as lf:
@@ -1440,7 +1499,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # تخزين معلومات العملية
     running_processes[fid] = {
         "container_name": container_name,
         "pid": pid,
@@ -1456,42 +1514,6 @@ def start_hosted_bot(fid):
     save_db()
     logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid})")
 
-def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
-    """
-    تثبيت المكتبات المستوردة من الملف داخل الحاوية.
-    تستخرج المكتبات باستخدام get_imports وتثبتها عبر pip.
-    """
-    if not self.is_available():
-        return False
-    
-    # استخراج المكتبات من الملف
-    imports = get_imports(file_path)
-    if not imports:
-        return True  # لا توجد مكتبات خارجية
-    
-    # تصفية المكتبات المدمجة
-    external_packages = [pkg for pkg in imports if pkg not in BUILTIN_MODULES]
-    if not external_packages:
-        return True
-    
-    logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
-    
-    # تثبيت كل مكتبة على حدة
-    failed = []
-    for pkg in external_packages:
-        install_name = PACKAGE_ALIASES.get(pkg, pkg)
-        cmd = f"pip install {install_name}"
-        output = self.run_command_in_container(user_id, cmd, detach=False)
-        if output is not None and "Successfully installed" in output:
-            logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
-        else:
-            logger.error(f"❌ فشل تثبيت {install_name}: {output}")
-            failed.append(install_name)
-    
-    if failed:
-        logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
-        return False
-    return True
 
 def stop_hosted_bot(fid):
     f = db["files"].get(fid)
