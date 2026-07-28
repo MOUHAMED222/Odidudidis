@@ -2101,8 +2101,9 @@ def handle_file_decision(chat_id, data):
         f["status"] = "approved"
         f["approved_at"] = now_iso()
         save_db()
-        start_hosted_bot(fid)
-        send_q(chat_id, "✅ تمت الموافقة على الملف وبدأ التشغيل.")
+        # تشغيل البوت في خلفية لتجنب تأخير الرد على الـ callback
+        threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
+        send_q(chat_id, "✅ تمت الموافقة على الملف وجاري تشغيله في الخلفية.")
 
         owner_id = int(f["owner"])
         owner_name = get_user_name(owner_id)
@@ -2168,8 +2169,8 @@ def handle_file_action(chat_id, user_id, data):
         if get_points(int(f["owner"])) < db["settings"]["daily_cost"]:
             send_q(chat_id, "❌ النقاط ماكافيين لتشغيله ليوم كامل.")
             return
-        start_hosted_bot(fid)
-        send_q(chat_id, "▶️ تم تشغيل البوت بنجاح.")
+        threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
+        send_q(chat_id, "▶️ جاري تشغيل البوت في الخلفية.")
     else:
         stop_hosted_bot(fid)
         try:
@@ -2630,6 +2631,9 @@ def callback_router(call):
     cooldown[user_id] = now
 
     try:
+        # تأكيد استلام الاستعلام فوراً
+        bot.answer_callback_query(call.id)
+
         if data == "support":
             support = db["settings"].get("support_account", CONTACT_USERNAME)
             if support:
@@ -2638,7 +2642,6 @@ def callback_router(call):
                 send_q(chat_id, f"📞 حساب الدعم: {support}", reply_markup=kb)
             else:
                 send_q(chat_id, "📞 لم يتم تعيين حساب دعم بعد.")
-            bot.answer_callback_query(call.id)
 
         elif data == "trust_channel":
             channel = db["settings"].get("trust_channel")
@@ -2653,7 +2656,6 @@ def callback_router(call):
                 send_q(chat_id, f"📢 قناة الثقة: {channel}", reply_markup=kb)
             else:
                 send_q(chat_id, "📢 لم يتم تعيين قناة ثقة بعد.")
-            bot.answer_callback_query(call.id)
 
         elif data == "check_sub":
             ok, _ = check_force_sub(user_id)
@@ -2785,11 +2787,13 @@ def callback_router(call):
         elif (data.startswith("admin_") or data in ("additem", "add_channel", "remove_channel") or data.startswith("delitem_") or data.startswith("edit_price_")) and is_admin(user_id):
             handle_admin_callback(chat_id, user_id, data)
 
-        bot.answer_callback_query(call.id)
-
     except Exception as e:
         logger.error(f"خطأ في معالجة الـ callback {data} من المستخدم {user_id}: {e}")
-        bot.answer_callback_query(call.id, "حدث خطأ، حاول مرة أخرى", show_alert=True)
+        # لا نستدعي answer_callback_query هنا لأنها قد تكون انتهت صلاحيتها، نكتفي بتسجيل الخطأ
+        try:
+            bot.send_message(chat_id, "حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى.")
+        except:
+            pass
 
 
 # ===================== دوال الرسائل النصية المعلقة =====================
