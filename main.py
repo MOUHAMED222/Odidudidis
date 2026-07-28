@@ -13,9 +13,9 @@ import re
 import ast
 import importlib.util
 import sys
-import shlex  # <-- استيراد shlex للتعامل الآمن مع الأسماء
+import shlex
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import telebot
 from telebot import types
@@ -1221,27 +1221,22 @@ class ContainerManager:
             return None
 
     # ---- الطريقة الجديدة الموثوقة للحصول على PID مع دعم الأسماء الخاصة ----
-    def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Optional[int]:
+    def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
-        تشغيل عملية في الحاوية والحصول على PID عن طريق كتابة PID إلى ملف.
-        base_cmd هو الأمر الأساسي (مثل "python3 -u /app/files/...") مع اقتباس المسار.
+        تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
+        تعيد (PID, log_content) حيث log_content أول 500 حرف من السجل.
         """
         if not self.is_available():
-            return None
+            return None, None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
 
-            # بناء الأمر الكامل مع إعادة توجيه المخرجات وكتابة PID
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            # نستخدم sh -c مع اقتباس الأمر الكامل بواسطة shlex.quote
-            # base_cmd يحتوي بالفعل على مسار مقتبس
             full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
-            # نمرر الأمر إلى sh -c مع اقتباس السلسلة بأكملها
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
-            # تنفيذ الأمر مع detach=False لانتظار الانتهاء
             result = container.exec_run(
                 cmd=shell_cmd,
                 workdir=workdir,
@@ -1250,12 +1245,10 @@ class ContainerManager:
             )
             if result.exit_code != 0:
                 logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
-                return None
+                return None, None
 
-            # انتظار لحين كتابة ملف PID
-            time.sleep(1)
+            time.sleep(2)  # انتظار لكتابة الملفات
 
-            # قراءة ملف PID
             pid_result = container.exec_run(
                 cmd=["cat", pid_file],
                 workdir=workdir,
@@ -1264,22 +1257,30 @@ class ContainerManager:
             )
             if pid_result.exit_code != 0:
                 logger.error("لم يتم العثور على ملف PID")
-                return None
+                return None, None
 
             pid_str = pid_result.output.decode('utf-8').strip()
-            if pid_str.isdigit():
-                return int(pid_str)
-            else:
+            if not pid_str.isdigit():
                 logger.error(f"PID غير صالح: {pid_str}")
-                return None
+                return None, None
+            pid = int(pid_str)
+
+            # قراءة أول 500 حرف من السجل للتشخيص
+            log_result = container.exec_run(
+                cmd=["head", "-c", "500", log_file],
+                workdir=workdir,
+                detach=False,
+                stream=False
+            )
+            log_content = ""
+            if log_result.exit_code == 0:
+                log_content = log_result.output.decode('utf-8', errors='replace')
+            return pid, log_content
         except Exception as e:
             logger.error(f"خطأ في start_process_and_get_pid: {e}")
-            return None
+            return None, None
 
     def is_process_running(self, user_id: str, pid: int) -> bool:
-        """
-        التحقق من وجود عملية باستخدام `kill -0` (موجود في جميع الحاويات).
-        """
         if not self.is_available() or not pid:
             return False
         container_name = self.get_user_container_name(user_id)
@@ -1394,12 +1395,10 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # بناء الأمر مع اقتباس المسار باستخدام shlex.quote
-    # container_path هو مسار داخل الحاوية وقد يحتوي على مسافات وأقواس
     base_cmd = f"python3 -u {shlex.quote(container_path)}"
-    pid = container_manager.start_process_and_get_pid(user_id, base_cmd, fid, workdir="/app")
+    pid, log_content = container_manager.start_process_and_get_pid(user_id, base_cmd, fid, workdir="/app")
     if pid is None:
-        logger.warning(f"لم يتم الحصول على PID للبوت {fid}، قد يكون انتهى فوراً.")
+        logger.warning(f"لم يتم الحصول على PID للبوت {fid}.")
         log_file = container_manager.get_log_path(user_id, fid)
         if os.path.exists(log_file):
             with open(log_file, 'r') as lf:
@@ -1411,7 +1410,7 @@ def start_hosted_bot(fid):
                     try:
                         bot.send_message(
                             int(user_id),
-                            f"❌ حدث خطأ أثناء تشغيل بوتك. يرجى مراجعة السجل: /file_log_{fid}"
+                            f"❌ حدث خطأ أثناء تشغيل بوتك. يرجى مراجعة السجل: /file_log_{fid}\n\n<pre>{esc(content[:500])}</pre>"
                         )
                     except:
                         pass
@@ -1420,9 +1419,23 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # التحقق من أن العملية ما زالت تعمل
+    # انتظار 3 ثوانٍ للتأكد من استمرارية العملية
+    time.sleep(3)
     if not container_manager.is_process_running(user_id, pid):
         logger.warning(f"البوت {fid} انتهى فوراً (PID {pid})")
+        # قراءة السجل بالكامل لإظهار الأخطاء
+        log_path = container_manager.get_log_path(user_id, fid)
+        if os.path.exists(log_path):
+            with open(log_path, 'r') as lf:
+                error_log = lf.read()
+                if error_log:
+                    try:
+                        bot.send_message(
+                            int(user_id),
+                            f"❌ بوتك توقف فوراً بسبب خطأ:\n<pre>{esc(error_log[:500])}</pre>"
+                        )
+                    except:
+                        pass
         f["status"] = "stopped"
         save_db()
         return
