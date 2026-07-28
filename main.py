@@ -1206,16 +1206,7 @@ class ContainerManager:
                 memswap_limit="1g",
             )
             container.start()
-            # تثبيت procps بشكل صحيح (بدون وسيطات خاطئة)
-            try:
-                install_cmd = "apt-get update && apt-get install -y procps"
-                output = self.run_command_in_container(user_id, install_cmd, detach=False)
-                if output is not None:
-                    logger.info(f"تم تثبيت procps في الحاوية {container_name}: {output}")
-                else:
-                    logger.warning(f"فشل تثبيت procps في الحاوية {container_name}")
-            except Exception as e:
-                logger.warning(f"استثناء أثناء تثبيت procps: {e}")
+            # لا حاجة لتثبيت procps، نعتمد على Docker API
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
             return container_name
         except Exception as e:
@@ -1288,30 +1279,30 @@ class ContainerManager:
 
     def get_process_pid(self, user_id: str, process_pattern: str) -> Optional[int]:
         """
-        الحصول على PID لعملية تطابق النمط (مثل اسم الملف).
+        الحصول على PID لعملية تطابق النمط (مثل اسم الملف) باستخدام Docker API.
         تعيد أول PID موجود، أو None.
         """
         if not self.is_available():
             return None
-        # الطريقة الموثوقة: استخدام python للبحث في /proc
-        python_cmd = (
-            f"python3 -c \"import os, glob; "
-            f"for pid in glob.glob('/proc/[0-9]*'): "
-            f"  try: "
-            f"    with open(os.path.join(pid, 'cmdline'), 'rb') as f: "
-            f"      cmdline = f.read().decode('utf-8', errors='ignore'); "
-            f"      if '{process_pattern}' in cmdline: "
-            f"        print(os.path.basename(pid)); break; "
-            f"  except: pass\""
-        )
-        output = self.run_command_in_container(user_id, python_cmd, detach=False)
-        if output:
-            try:
-                pid = int(output.strip())
-                return pid
-            except (ValueError):
-                pass
-        return None
+        container_name = self.get_user_container_name(user_id)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            # استخدام container.top() للحصول على قائمة العمليات
+            top_result = container.top()
+            processes = top_result.get('Processes', [])
+            for proc in processes:
+                # proc هو قائمة مثل [UID, PID, PPID, C, STIME, TTY, TIME, CMD]
+                if len(proc) >= 8:
+                    cmd = ' '.join(proc[7:])  # الأمر الكامل
+                    if process_pattern in cmd:
+                        try:
+                            return int(proc[1])  # PID في الفهرس 1
+                        except ValueError:
+                            pass
+            return None
+        except Exception as e:
+            logger.error(f"خطأ في get_process_pid: {e}")
+            return None
 
     def kill_process(self, user_id: str, pid: int) -> bool:
         """قتل عملية داخل الحاوية بواسطة PID."""
@@ -1322,12 +1313,20 @@ class ContainerManager:
         return result is not None  # إذا لم يحدث خطأ
 
     def is_process_running(self, user_id: str, pid: int) -> bool:
-        """التحقق من وجود عملية بواسطة PID."""
+        """التحقق من وجود عملية بواسطة PID باستخدام Docker API."""
         if not self.is_available():
             return False
-        cmd = f"kill -0 {pid} 2>/dev/null && echo running"
-        output = self.run_command_in_container(user_id, cmd, detach=False)
-        return output == "running"
+        container_name = self.get_user_container_name(user_id)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            top_result = container.top()
+            processes = top_result.get('Processes', [])
+            for proc in processes:
+                if len(proc) >= 2 and proc[1] == str(pid):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
         """الحصول على مسار ملف السجل للملف المعطى على المضيف."""
@@ -1445,10 +1444,8 @@ def start_hosted_bot(fid):
 
     # تحديد مسار سجل الإخراج
     log_file = container_manager.get_log_path(user_id, fid)
-    # تشغيل السكربت داخل الحاوية مع توجيه المخرجات
-    # نقوم بتشغيل البوت في الخلفية ونكتب PID في ملف
-    pid_file = f"/app/pid_{fid}.txt"
-    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1 & echo $! > {pid_file}"
+    # تشغيل السكربت داخل الحاوية مع توجيه المخرجات في الخلفية
+    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1"
     exec_id = container_manager.run_command_in_container(user_id, cmd, detach=True)
     if not exec_id:
         logger.error(f"فشل تشغيل البوت {fid} في الحاوية")
@@ -1456,17 +1453,10 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # انتظار لحين كتابة PID
+    # انتظار لحين بدء العملية
     time.sleep(2)
-    # قراءة PID من الملف
-    read_pid_cmd = f"cat {pid_file}"
-    pid_output = container_manager.run_command_in_container(user_id, read_pid_cmd, detach=False)
-    pid = None
-    if pid_output:
-        try:
-            pid = int(pid_output.strip())
-        except ValueError:
-            pass
+    # الحصول على PID باستخدام Docker API
+    pid = container_manager.get_process_pid(user_id, container_filename)
 
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
@@ -1478,6 +1468,7 @@ def start_hosted_bot(fid):
                     logger.error(f"البوت {fid} انتهى بخطأ. السجل: {content[:200]}")
                     f["status"] = "stopped"
                     save_db()
+                    # إشعار المستخدم
                     try:
                         bot.send_message(
                             int(user_id),
@@ -1498,8 +1489,7 @@ def start_hosted_bot(fid):
         "log_path": log_file,
         "file_path": container_path,
         "container_filename": container_filename,
-        "exec_id": exec_id,
-        "pid_file": pid_file
+        "exec_id": exec_id
     }
 
     f["status"] = "running"
