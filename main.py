@@ -1310,6 +1310,24 @@ class ContainerManager:
                 return pid
             except (ValueError):
                 pass
+        # الطريقة النهائية: استخدام python للبحث في /proc
+        python_cmd = (
+            f"python3 -c \"import os, glob; "
+            f"for pid in glob.glob('/proc/[0-9]*'): "
+            f"  try: "
+            f"    with open(os.path.join(pid, 'cmdline'), 'rb') as f: "
+            f"      cmdline = f.read().decode('utf-8', errors='ignore'); "
+            f"      if '{process_pattern}' in cmdline: "
+            f"        print(os.path.basename(pid)); break; "
+            f"  except: pass\""
+        )
+        output_py = self.run_command_in_container(user_id, python_cmd, detach=False)
+        if output_py:
+            try:
+                pid = int(output_py.strip())
+                return pid
+            except (ValueError):
+                pass
         return None
 
     def kill_process(self, user_id: str, pid: int) -> bool:
@@ -1453,7 +1471,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # الحصول على PID للعملية (الآن pgrep أو ps بديل)
+    # الحصول على PID للعملية (الآن pgrep أو ps بديل أو python)
     pid = container_manager.get_process_pid(user_id, container_filename)
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
