@@ -845,6 +845,10 @@ def main_menu_kb(user_id):
         types.InlineKeyboardButton("📜 القوانين", callback_data="rules", style="success"),
         types.InlineKeyboardButton("ℹ️ المساعدة", callback_data="help", style="success"),
     )
+    # زر جديد لإضافة المكتبات
+    kb.add(
+        types.InlineKeyboardButton("📦 إضافة مكاتب", callback_data="install_libs", style="primary"),
+    )
     if is_admin(user_id):
         kb.add(types.InlineKeyboardButton("🛡️ لوحة الإدارة", callback_data="admin_panel", style="danger"))
     return kb
@@ -947,9 +951,9 @@ PACKAGE_ALIASES = {
     "PIL": "pillow",
     "telegram": "python-telegram-bot",
     "telegram.ext": "python-telegram-bot",
-    "telebot": "pyTelegramBotAPI",           # <--- إضافة هامة لـ telebot
+    "telebot": "pyTelegramBotAPI",
     "requests": "requests",
-    "sqlite3": "sqlite3",                   # مدمج لكن تضاف للتوضيح
+    "sqlite3": "sqlite3",
 }
 
 def get_imports(file_path):
@@ -1232,11 +1236,47 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    # ---- تثبيت المكتبات المستوردة من الملف مباشرة داخل الحاوية ----
+    # ---- تثبيت المكتبات من ملف txt داخل الحاوية ----
+    def install_libraries_from_file(self, user_id: str, file_content: str) -> bool:
+        """
+        تثبيت المكتبات المذكورة في ملف txt (سطر لكل مكتبة) داخل حاوية المستخدم.
+        تستخدم pip install --user مع تعيين PYTHONUSERBASE إلى /app/.local.
+        """
+        if not self.is_available():
+            return False
+        container_name = self.get_user_container_name(user_id)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            # قراءة السطور وتنظيفها
+            lines = [line.strip() for line in file_content.splitlines() if line.strip() and not line.startswith('#')]
+            if not lines:
+                return True  # لا توجد مكتبات
+            
+            # نسخ المحتوى إلى ملف مؤقت داخل الحاوية
+            libs_file = "/app/files/user_libs.txt"
+            # كتابة الملف داخل الحاوية باستخدام echo
+            for lib in lines:
+                # نكتب سطراً سطراً لتجنب مشاكل الأقتباس
+                cmd = f"echo '{lib}' >> {libs_file}"
+                self.run_command_in_container(user_id, cmd, detach=False)
+            
+            # تثبيت المكتبات باستخدام --user مع PYTHONUSERBASE
+            install_cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r {libs_file}"
+            output = self.run_command_in_container(user_id, install_cmd, detach=False)
+            if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
+                logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
+                return True
+            else:
+                logger.error(f"❌ فشل تثبيت المكتبات للمستخدم {user_id}: {output}")
+                return False
+        except Exception as e:
+            logger.error(f"خطأ في install_libraries_from_file: {e}")
+            return False
+
+    # ---- تثبيت المكتبات المستوردة من الملف ----
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
         """
-        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
-        تستخدم get_imports لاستخراج المكتبات وتثبيتها عبر pip.
+        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية باستخدام --user.
         """
         if not self.is_available():
             return False
@@ -1260,14 +1300,15 @@ class ContainerManager:
         failed = []
         for pkg in external_packages:
             install_name = PACKAGE_ALIASES.get(pkg, pkg)
-            check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+            # التحقق من التثبيت المسبق
+            check_cmd = f"PYTHONUSERBASE=/app/.local python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
             check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
             if check_output and "installed" in check_output:
                 logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
                 continue
             
             logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
-            cmd = f"pip install {install_name}"
+            cmd = f"PYTHONUSERBASE=/app/.local pip install --user {install_name}"
             output = self.run_command_in_container(user_id, cmd, detach=False)
             if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
@@ -1282,7 +1323,7 @@ class ContainerManager:
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
         """
-        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية.
+        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية باستخدام --user.
         """
         if not self.is_available():
             return False
@@ -1296,7 +1337,7 @@ class ContainerManager:
             logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
             return False
 
-        cmd = f"pip install -r /app/files/requirements.txt"
+        cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r /app/files/requirements.txt"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output is not None:
             logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output[:200]}")
@@ -1307,7 +1348,7 @@ class ContainerManager:
 
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
-        تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
+        تشغيل عملية في الحاوية مع تعيين PYTHONPATH و PYTHONUSERBASE.
         """
         if not self.is_available():
             return None, None
@@ -1315,16 +1356,24 @@ class ContainerManager:
         try:
             container = self.docker_client.containers.get(container_name)
 
+            # تعيين متغيرات البيئة لتضمين مسار المكتبات المثبتة بواسطة --user
+            env = {
+                "PYTHONUSERBASE": "/app/.local",
+                "PYTHONPATH": "/app/.local/lib/python3.11/site-packages",
+                "PATH": "/app/.local/bin:/usr/local/bin:/usr/bin:/bin"
+            }
+
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            full_cmd = f"export PYTHONUSERBASE=/app/.local; export PYTHONPATH=/app/.local/lib/python3.11/site-packages; {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
             result = container.exec_run(
                 cmd=shell_cmd,
                 workdir=workdir,
                 detach=False,
-                stream=False
+                stream=False,
+                environment=env
             )
             if result.exit_code != 0:
                 logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
@@ -1719,6 +1768,41 @@ def handle_document(message):
         return
 
     action_data = pending_action.get(user_id, {})
+    
+    # ===== معالجة رفع ملف المكتبات =====
+    if action_data.get("action") == "awaiting_libs_file":
+        doc = message.document
+        if not doc.file_name.endswith(".txt"):
+            reply_q(message, "❌ الخاص يكون الملف بصيغة .txt فقط.")
+            return
+        
+        file_info = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        try:
+            content = downloaded.decode('utf-8')
+        except UnicodeDecodeError:
+            reply_q(message, "❌ الملف ليس نصياً صالحاً.")
+            return
+        
+        # التأكد من وجود حاوية للمستخدم
+        container_name = container_manager.ensure_container(str(user_id))
+        if not container_name:
+            reply_q(message, "❌ فشل إنشاء الحاوية لتثبيت المكتبات.")
+            pending_action.pop(user_id, None)
+            return
+        
+        # تثبيت المكتبات
+        msg = bot.send_message(message.chat.id, "⏳ جاري تثبيت المكتبات، يرجى الانتظار...")
+        success = container_manager.install_libraries_from_file(str(user_id), content)
+        if success:
+            bot.edit_message_text("✅ تم تثبيت جميع المكتبات بنجاح.", message.chat.id, msg.message_id)
+        else:
+            bot.edit_message_text("❌ فشل تثبيت بعض المكتبات. تأكد من صحة الأسماء.", message.chat.id, msg.message_id)
+        
+        pending_action.pop(user_id, None)
+        return
+
+    # ===== معالجة تحديث الملف =====
     if action_data.get("action") == "awaiting_file_update":
         fid = action_data.get("fid")
         if not fid or fid not in db["files"]:
@@ -1746,6 +1830,7 @@ def handle_document(message):
         pending_action.pop(user_id, None)
         return
 
+    # ===== رفع ملف البوت الرئيسي =====
     if pending_action.get(user_id, {}).get("action") != "awaiting_file":
         reply_q(message, "📎 خاصك تضغط أولاً على «رفع ملف 📤» من القائمة قبل إرسال الملف.")
         return
@@ -2746,6 +2831,11 @@ def callback_router(call):
         elif data == "ask_admin":
             pending_action[user_id] = {"action": "awaiting_question"}
             send_q(chat_id, "💬 اكتب سؤالك الآن وسيصل مباشرة إلى الإدارة.")
+
+        # ===== زر إضافة المكتبات =====
+        elif data == "install_libs":
+            pending_action[user_id] = {"action": "awaiting_libs_file"}
+            send_q(chat_id, "📤 أرسل ملف نصي (txt) يحتوي على أسماء المكتبات المراد تثبيتها، سطر لكل مكتبة.\nمثال:\n<code>requests\ntelebot\nnumpy</code>")
 
         elif data == "admin_panel" and is_admin(user_id):
             edit_q("🛡️ <b>لوحة الإدارة</b>", chat_id, call.message.message_id, reply_markup=admin_menu_kb())
