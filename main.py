@@ -1456,6 +1456,42 @@ def start_hosted_bot(fid):
     save_db()
     logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid})")
 
+def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
+    """
+    تثبيت المكتبات المستوردة من الملف داخل الحاوية.
+    تستخرج المكتبات باستخدام get_imports وتثبتها عبر pip.
+    """
+    if not self.is_available():
+        return False
+    
+    # استخراج المكتبات من الملف
+    imports = get_imports(file_path)
+    if not imports:
+        return True  # لا توجد مكتبات خارجية
+    
+    # تصفية المكتبات المدمجة
+    external_packages = [pkg for pkg in imports if pkg not in BUILTIN_MODULES]
+    if not external_packages:
+        return True
+    
+    logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
+    
+    # تثبيت كل مكتبة على حدة
+    failed = []
+    for pkg in external_packages:
+        install_name = PACKAGE_ALIASES.get(pkg, pkg)
+        cmd = f"pip install {install_name}"
+        output = self.run_command_in_container(user_id, cmd, detach=False)
+        if output is not None and "Successfully installed" in output:
+            logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
+        else:
+            logger.error(f"❌ فشل تثبيت {install_name}: {output}")
+            failed.append(install_name)
+    
+    if failed:
+        logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
+        return False
+    return True
 
 def stop_hosted_bot(fid):
     f = db["files"].get(fid)
