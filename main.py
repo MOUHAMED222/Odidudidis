@@ -13,6 +13,7 @@ import re
 import ast
 import importlib.util
 import sys
+import shlex  # <-- استيراد shlex للتعامل الآمن مع الأسماء
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -1219,23 +1220,30 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    # ---- الطريقة الجديدة الموثوقة للحصول على PID ----
-    def start_process_and_get_pid(self, user_id: str, cmd: str, workdir: str = "/app") -> Optional[int]:
+    # ---- الطريقة الجديدة الموثوقة للحصول على PID مع دعم الأسماء الخاصة ----
+    def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Optional[int]:
         """
-        تشغيل عملية في الحاوية والحصول على PID عن طريق كتابة PID إلى ملف
-        ثم قراءة الملف بعد بدء العملية.
+        تشغيل عملية في الحاوية والحصول على PID عن طريق كتابة PID إلى ملف.
+        base_cmd هو الأمر الأساسي (مثل "python3 -u /app/files/...") مع اقتباس المسار.
         """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # إنشاء أمر يبدأ العملية في الخلفية، ويوجه المخرجات، ويكتب PID إلى ملف
-            # نستخدم sh -c لتجميع الأوامر
-            full_cmd = f"sh -c '{cmd} > /app/logs/process.log 2>&1 & echo $! > /app/logs/process.pid'"
+
+            # بناء الأمر الكامل مع إعادة توجيه المخرجات وكتابة PID
+            log_file = f"/app/logs/{fid}.log"
+            pid_file = f"/app/logs/{fid}.pid"
+            # نستخدم sh -c مع اقتباس الأمر الكامل بواسطة shlex.quote
+            # base_cmd يحتوي بالفعل على مسار مقتبس
+            full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            # نمرر الأمر إلى sh -c مع اقتباس السلسلة بأكملها
+            shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
+
             # تنفيذ الأمر مع detach=False لانتظار الانتهاء
             result = container.exec_run(
-                cmd=full_cmd,
+                cmd=shell_cmd,
                 workdir=workdir,
                 detach=False,
                 stream=False
@@ -1249,7 +1257,7 @@ class ContainerManager:
 
             # قراءة ملف PID
             pid_result = container.exec_run(
-                cmd=["cat", "/app/logs/process.pid"],
+                cmd=["cat", pid_file],
                 workdir=workdir,
                 detach=False,
                 stream=False
@@ -1386,9 +1394,10 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # تشغيل البوت باستخدام الطريقة الجديدة التي تحصل على PID موثوق
-    cmd = f"python3 /app/files/{container_filename}"
-    pid = container_manager.start_process_and_get_pid(user_id, cmd, workdir="/app")
+    # بناء الأمر مع اقتباس المسار باستخدام shlex.quote
+    # container_path هو مسار داخل الحاوية وقد يحتوي على مسافات وأقواس
+    base_cmd = f"python3 -u {shlex.quote(container_path)}"
+    pid = container_manager.start_process_and_get_pid(user_id, base_cmd, fid, workdir="/app")
     if pid is None:
         logger.warning(f"لم يتم الحصول على PID للبوت {fid}، قد يكون انتهى فوراً.")
         log_file = container_manager.get_log_path(user_id, fid)
