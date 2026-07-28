@@ -1206,15 +1206,16 @@ class ContainerManager:
                 memswap_limit="1g",
             )
             container.start()
-            # تثبيت procps لتوفير pgrep و pkill
+            # تثبيت procps بشكل متزامن للتأكد من وجود pgrep و ps
             try:
-                exec_id = self.docker_client.api.exec_create(container.id, "apt-get update -qq && apt-get install -y procps -qq")
-                self.docker_client.api.exec_start(exec_id, detach=True)
-                # انتظار انتهاء التثبيت
-                time.sleep(10)
-                logger.info(f"تم تثبيت procps في الحاوية {container_name}")
+                install_cmd = "apt-get update -qq && apt-get install -y procps -qq"
+                output = self.run_command_in_container(user_id, install_cmd, detach=False)
+                if output is not None:
+                    logger.info(f"تم تثبيت procps في الحاوية {container_name}: {output}")
+                else:
+                    logger.warning(f"فشل تثبيت procps في الحاوية {container_name}")
             except Exception as e:
-                logger.warning(f"فشل تثبيت procps في الحاوية: {e}")
+                logger.warning(f"استثناء أثناء تثبيت procps: {e}")
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
             return container_name
         except Exception as e:
@@ -1292,7 +1293,7 @@ class ContainerManager:
         """
         if not self.is_available():
             return None
-        # محاولة استخدام pgrep أولاً (إذا كان متوفراً)
+        # محاولة استخدام pgrep أولاً
         cmd = f"pgrep -f '{process_pattern}'"
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output:
@@ -1301,16 +1302,7 @@ class ContainerManager:
                 return pid
             except (ValueError, IndexError):
                 pass
-        # في حال فشل pgrep، نستخدم ps aux | grep كبديل
-        cmd_alt = f"ps aux | grep -E '{process_pattern}' | grep -v grep | awk '{{print $2}}' | head -n 1"
-        output_alt = self.run_command_in_container(user_id, cmd_alt, detach=False)
-        if output_alt:
-            try:
-                pid = int(output_alt.strip())
-                return pid
-            except (ValueError):
-                pass
-        # الطريقة النهائية: استخدام python للبحث في /proc
+        # في حال فشل pgrep، نستخدم طريقة Python للبحث في /proc
         python_cmd = (
             f"python3 -c \"import os, glob; "
             f"for pid in glob.glob('/proc/[0-9]*'): "
@@ -1471,7 +1463,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # الحصول على PID للعملية (الآن pgrep أو ps بديل أو python)
+    # الحصول على PID للعملية
     pid = container_manager.get_process_pid(user_id, container_filename)
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
