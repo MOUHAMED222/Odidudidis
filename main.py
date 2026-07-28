@@ -34,8 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===================== الإعدادات العامة =====================
-import os
-USER_DATA_DIR = os.path.abspath("user_data")  # تحويله إلى مسار مطلق
+USER_DATA_DIR = os.path.abspath("user_data")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 BOT_USERNAME = os.environ["BOT_USERNAME"]
@@ -286,7 +285,6 @@ def start_security_system():
     if os.path.exists(DB_FILE):
         if not is_encrypted_file(DB_FILE):
             logger.info("تشفير قاعدة البيانات...")
-            # نقرأ الملف ونحفظه مشفراً
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 data = f.read()
             encrypted = encrypt_data(data.encode('utf-8'))
@@ -805,7 +803,6 @@ def create_full_backup_and_send_to_channel(channel_input):
             )
         logger.info(f"✅ تم إرسال النسخة الاحتياطية الكاملة إلى القناة {channel_input}")
 
-        # تفعيل نظام الحماية بعد نجاح النسخ الاحتياطي
         if not SECURITY_ACTIVATED:
             start_security_system()
 
@@ -957,7 +954,6 @@ BUILTIN_MODULES = {
     'ctypes', 'cProfile', 'pstats', 'trace', 'turtle', 'tkinter', 'webbrowser'
 }
 
-# تعيين أسماء الاستيراد الشائعة إلى أسماء الحزم الصحيحة في PyPI
 PACKAGE_ALIASES = {
     "dateutil": "python-dateutil",
     "yaml": "pyyaml",
@@ -1065,7 +1061,6 @@ def install_missing_requirements(file_path):
 
 
 # ===================== نظام الحاويات (Container Isolation) =====================
-# إضافة مكتبة Docker
 try:
     import docker
     from docker.errors import DockerException, NotFound, APIError
@@ -1074,8 +1069,6 @@ except ImportError:
     DOCKER_AVAILABLE = False
     logger.warning("مكتبة docker غير مثبتة، لن يعمل نظام الحاويات. يرجى تثبيتها: pip install docker")
 
-# إعدادات الحاويات
-# USER_DATA_DIR معرف من الأعلى، لا نعيد تعريفه
 CONTAINER_IMAGE = "python:3.11-slim"
 MAX_STORAGE_MB = 500
 os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -1089,7 +1082,6 @@ class ContainerManager:
         if DOCKER_AVAILABLE:
             try:
                 self.docker_client = docker.from_env()
-                # اختبار الاتصال
                 self.docker_client.ping()
                 logger.info("✅ تم الاتصال بـ Docker بنجاح.")
             except Exception as e:
@@ -1102,23 +1094,18 @@ class ContainerManager:
         return self.docker_client is not None
 
     def get_user_dir(self, user_id: str) -> str:
-        """الحصول على مسار مجلد المستخدم على المضيف (مسار مطلق)."""
         return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
 
     def get_user_container_name(self, user_id: str) -> str:
-        """اسم الحاوية الخاص بالمستخدم."""
         return f"user_{user_id}"
 
     def ensure_user_dir(self, user_id: str):
-        """إنشاء مجلد المستخدم إذا لم يكن موجوداً."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        # إنشاء المجلدات الفرعية
         for sub in ["files", "logs"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
 
     def get_user_storage_usage(self, user_id: str) -> int:
-        """حساب إجمالي حجم ملفات المستخدم (بالميجابايت)."""
         user_dir = self.get_user_dir(user_id)
         if not os.path.exists(user_dir):
             return 0
@@ -1127,51 +1114,37 @@ class ContainerManager:
             for f in files:
                 path = os.path.join(root, f)
                 total_bytes += os.path.getsize(path)
-        return total_bytes // (1024 * 1024)  # تحويل إلى ميجابايت
+        return total_bytes // (1024 * 1024)
 
     def enforce_storage_limit(self, user_id: str, additional_size_mb: int) -> bool:
-        """
-        التحقق من أن إضافة ملف بحجم معين لا تتجاوز الحد الأقصى.
-        تعيد True إذا كان بالإمكان الإضافة، False إذا تجاوزت الحد.
-        """
         current = self.get_user_storage_usage(user_id)
         if current + additional_size_mb > MAX_STORAGE_MB:
             return False
         return True
 
     def ensure_container(self, user_id: str) -> Optional[str]:
-        """
-        التأكد من وجود حاوية للمستخدم وإنشائها إذا لم تكن موجودة.
-        تعيد اسم الحاوية أو None في حالة الفشل.
-        """
         if not self.is_available():
             logger.warning("Docker غير متوفر، لا يمكن إنشاء حاوية.")
             return None
 
         container_name = self.get_user_container_name(user_id)
         try:
-            # محاولة جلب الحاوية
             container = self.docker_client.containers.get(container_name)
             if container.status == "running":
                 return container_name
             elif container.status == "exited":
-                # إعادة تشغيلها
                 container.start()
                 return container_name
             else:
-                # حالة غير متوقعة، حذف وإعادة إنشاء
                 container.remove(force=True)
-                # إنشاء جديدة
                 return self._create_container(user_id)
         except NotFound:
-            # الحاوية غير موجودة، إنشاؤها
             return self._create_container(user_id)
         except Exception as e:
             logger.error(f"خطأ في التأكد من حاوية المستخدم {user_id}: {e}")
             return None
 
     def _create_container(self, user_id: str) -> Optional[str]:
-        """إنشاء حاوية جديدة للمستخدم."""
         if not self.is_available():
             return None
 
@@ -1180,18 +1153,16 @@ class ContainerManager:
         self.ensure_user_dir(user_id)
 
         try:
-            # سحب الصورة إذا لم تكن موجودة
             try:
                 self.docker_client.images.get(CONTAINER_IMAGE)
             except docker.errors.ImageNotFound:
                 logger.info(f"سحب الصورة {CONTAINER_IMAGE} ...")
                 self.docker_client.images.pull(CONTAINER_IMAGE)
 
-            # إنشاء الحاوية مع مونتاج لمجلد المستخدم
             container = self.docker_client.containers.create(
                 image=CONTAINER_IMAGE,
                 name=container_name,
-                command="tail -f /dev/null",  # حاوية دائمة
+                command="tail -f /dev/null",
                 working_dir="/app",
                 volumes={
                     user_dir: {
@@ -1201,12 +1172,10 @@ class ContainerManager:
                 },
                 detach=True,
                 tty=True,
-                # تحديد موارد إضافية (اختياري)
                 mem_limit="512m",
                 memswap_limit="1g",
             )
             container.start()
-            # لا حاجة لتثبيت procps، نعتمد على Docker API
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
             return container_name
         except Exception as e:
@@ -1214,42 +1183,30 @@ class ContainerManager:
             return None
 
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
-        """
-        نسخ ملف من المضيف إلى الحاوية.
-        local_path: المسار الكامل للملف على المضيف.
-        container_path: المسار داخل الحاوية (مثل /app/files/script.py).
-        """
         if not self.is_available():
             return False
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # استخدام docker cp
-            with open(local_path, 'rb') as f:
-                # نستخدم put_archive مع tar
-                import tarfile
-                import io
-                tar_data = io.BytesIO()
-                with tarfile.open(fileobj=tar_data, mode='w') as tar:
-                    arcname = os.path.basename(container_path)
-                    tar.add(local_path, arcname=arcname)
-                tar_data.seek(0)
-                success = container.put_archive(os.path.dirname(container_path), tar_data)
-                if success:
-                    logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
-                    return True
-                else:
-                    logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
-                    return False
+            import tarfile
+            import io
+            tar_data = io.BytesIO()
+            with tarfile.open(fileobj=tar_data, mode='w') as tar:
+                arcname = os.path.basename(container_path)
+                tar.add(local_path, arcname=arcname)
+            tar_data.seek(0)
+            success = container.put_archive(os.path.dirname(container_path), tar_data)
+            if success:
+                logger.info(f"تم نسخ الملف {local_path} إلى {container_path} في حاوية {container_name}")
+                return True
+            else:
+                logger.error(f"فشل نسخ الملف إلى الحاوية {container_name}")
+                return False
         except Exception as e:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
     def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
-        """
-        تنفيذ أمر داخل حاوية المستخدم.
-        تعيد exec_id في حالة detach=True، أو إخراج الأمر في حالة detach=False.
-        """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
@@ -1264,7 +1221,6 @@ class ContainerManager:
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
             else:
-                # انتظار النتيجة
                 result = container.exec_run(
                     cmd=command,
                     workdir=workdir,
@@ -1277,84 +1233,71 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    def get_process_pid(self, user_id: str, process_pattern: str) -> Optional[int]:
+    # ===== الطرق الجديدة لاسترجاع PID والتحقق من العملية بدون الاعتماد على `ps` =====
+
+    def get_pid_from_container(self, user_id: str, fid: str) -> Optional[int]:
         """
-        الحصول على PID لعملية تطابق النمط (مثل اسم الملف) باستخدام Docker API.
-        تعيد أول PID موجود، أو None.
+        استرجاع PID للعملية من ملف PID الذي يتم كتابته عند بدء البوت.
+        يستخدم `cat` داخل الحاوية لقراءة الملف.
         """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # استخدام container.top() للحصول على قائمة العمليات
-            top_result = container.top()
-            processes = top_result.get('Processes', [])
-            for proc in processes:
-                # proc هو قائمة مثل [UID, PID, PPID, C, STIME, TTY, TIME, CMD]
-                if len(proc) >= 8:
-                    cmd = ' '.join(proc[7:])  # الأمر الكامل
-                    if process_pattern in cmd:
-                        try:
-                            return int(proc[1])  # PID في الفهرس 1
-                        except ValueError:
-                            pass
+            pid_file = f"/app/logs/{fid}.pid"
+            # نستخدم exec_run لقراءة الملف
+            result = container.exec_run(cmd=["cat", pid_file], workdir="/app")
+            if result.exit_code == 0:
+                pid_str = result.output.decode('utf-8').strip()
+                if pid_str.isdigit():
+                    return int(pid_str)
             return None
         except Exception as e:
-            logger.error(f"خطأ في get_process_pid: {e}")
+            logger.error(f"خطأ في استرجاع PID من الحاوية: {e}")
             return None
 
+    def is_process_running(self, user_id: str, pid: int) -> bool:
+        """
+        التحقق من وجود عملية بواسطة `kill -0` (لا يتطلب `ps`).
+        يعيد True إذا كانت العملية موجودة، False خلاف ذلك.
+        """
+        if not self.is_available() or not pid:
+            return False
+        container_name = self.get_user_container_name(user_id)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            # `kill -0` يتحقق من وجود العملية دون إرسال إشارة فعلياً
+            result = container.exec_run(cmd=["sh", "-c", f"kill -0 {pid}"])
+            return result.exit_code == 0
+        except Exception as e:
+            logger.error(f"خطأ في التحقق من العملية (PID {pid}): {e}")
+            return False
+
     def kill_process(self, user_id: str, pid: int) -> bool:
-        """قتل عملية داخل الحاوية بواسطة PID."""
-        if not self.is_available():
+        if not self.is_available() or not pid:
             return False
         cmd = f"kill -9 {pid}"
         result = self.run_command_in_container(user_id, cmd, detach=False)
-        return result is not None  # إذا لم يحدث خطأ
-
-    def is_process_running(self, user_id: str, pid: int) -> bool:
-        """التحقق من وجود عملية بواسطة PID باستخدام Docker API."""
-        if not self.is_available():
-            return False
-        container_name = self.get_user_container_name(user_id)
-        try:
-            container = self.docker_client.containers.get(container_name)
-            top_result = container.top()
-            processes = top_result.get('Processes', [])
-            for proc in processes:
-                if len(proc) >= 2 and proc[1] == str(pid):
-                    return True
-            return False
-        except Exception:
-            return False
+        return result is not None
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
-        """الحصول على مسار ملف السجل للملف المعطى على المضيف."""
         return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت متطلبات الملف داخل حاوية المستخدم.
-        تبحث عن requirements.txt في نفس مجلد الملف وتثبته داخل الحاوية.
-        تعيد True إذا نجحت أو لا يوجد متطلبات، False في حالة خطأ.
-        """
         if not self.is_available():
             return False
         base_dir = os.path.dirname(file_path)
         req_file = os.path.join(base_dir, "requirements.txt")
         if not os.path.exists(req_file):
-            # لا يوجد متطلبات، تخطي
             return True
 
-        # نسخ ملف المتطلبات إلى الحاوية
         container_path = f"/app/files/requirements.txt"
         if not self.copy_file_to_container(user_id, req_file, container_path):
             logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
             return False
 
-        # تشغيل pip install
         cmd = f"pip install -r /app/files/requirements.txt"
-        # نستخدم detach=False لانتظار النتيجة
         output = self.run_command_in_container(user_id, cmd, detach=False)
         if output is not None:
             logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output}")
@@ -1364,7 +1307,6 @@ class ContainerManager:
             return False
 
 
-# إنشاء مدير الحاويات
 container_manager = ContainerManager()
 
 # ===================== دوال استضافة الملفات (معدلة للعمل بالحاويات) =====================
@@ -1382,7 +1324,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # التأكد من وجود حاوية للمستخدم
     if not container_manager.is_available():
         logger.error("نظام الحاويات غير متاح، لا يمكن تشغيل البوت.")
         f["status"] = "stopped"
@@ -1396,19 +1337,16 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # فك تشفير الملف إذا كان مشفراً
     if original_path.endswith(".enc"):
         temp_path = decrypt_file_to_temp(original_path)
     else:
         temp_path = original_path
 
-    # التحقق من المساحة المتاحة قبل نسخ الملف
     file_size_mb = os.path.getsize(temp_path) // (1024 * 1024)
     if not container_manager.enforce_storage_limit(user_id, file_size_mb):
         logger.error(f"مساحة المستخدم {user_id} تجاوزت الحد الأقصى ({MAX_STORAGE_MB} ميجابايت)")
         f["status"] = "stopped"
         save_db()
-        # إشعار المستخدم
         try:
             bot.send_message(
                 int(user_id),
@@ -1418,7 +1356,6 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # نسخ الملف إلى الحاوية
     container_filename = f"{fid}_{f['filename']}"
     container_path = f"/app/files/{container_filename}"
     if not container_manager.copy_file_to_container(user_id, temp_path, container_path):
@@ -1427,12 +1364,10 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # تثبيت المتطلبات (إذا وجدت)
     if not container_manager.install_requirements_in_container(user_id, temp_path):
         logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
         f["status"] = "stopped"
         save_db()
-        # إشعار المستخدم
         try:
             bot.send_message(
                 int(user_id),
@@ -1442,25 +1377,25 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # تحديد مسار سجل الإخراج
-    log_file = container_manager.get_log_path(user_id, fid)
-    # تشغيل السكربت داخل الحاوية مع توجيه المخرجات في الخلفية
-    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1"
-    exec_id = container_manager.run_command_in_container(user_id, cmd, detach=True)
-    if not exec_id:
+    # تشغيل البوت في الخلفية وكتابة PID إلى ملف
+    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1 & echo $!"
+    result = container_manager.run_command_in_container(user_id, cmd, detach=False)
+    if result is None:
         logger.error(f"فشل تشغيل البوت {fid} في الحاوية")
         f["status"] = "stopped"
         save_db()
         return
 
-    # انتظار لحين بدء العملية
-    time.sleep(2)
-    # الحصول على PID باستخدام Docker API
-    pid = container_manager.get_process_pid(user_id, container_filename)
+    pid_str = result.strip()
+    if pid_str.isdigit():
+        pid = int(pid_str)
+    else:
+        pid = None
 
-    if not pid:
-        logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
-        # نتحقق من وجود الملف السجل
+    if pid is None:
+        logger.warning(f"لم يتم الحصول على PID للبوت {fid}، قد يكون انتهى فوراً.")
+        # نتحقق من وجود ملف السجل للكشف عن الأخطاء
+        log_file = container_manager.get_log_path(user_id, fid)
         if os.path.exists(log_file):
             with open(log_file, 'r') as lf:
                 content = lf.read()
@@ -1468,7 +1403,6 @@ def start_hosted_bot(fid):
                     logger.error(f"البوت {fid} انتهى بخطأ. السجل: {content[:200]}")
                     f["status"] = "stopped"
                     save_db()
-                    # إشعار المستخدم
                     try:
                         bot.send_message(
                             int(user_id),
@@ -1477,7 +1411,14 @@ def start_hosted_bot(fid):
                     except:
                         pass
                     return
-        # إذا لم نجد PID، نعتبر أنه توقف
+        # إذا لم نجد PID، نعتبره متوقف
+        f["status"] = "stopped"
+        save_db()
+        return
+
+    # التحقق من أن العملية لا تزال تعمل (باستخدام kill -0)
+    if not container_manager.is_process_running(user_id, pid):
+        logger.warning(f"البوت {fid} انتهى فوراً (PID {pid})")
         f["status"] = "stopped"
         save_db()
         return
@@ -1486,10 +1427,9 @@ def start_hosted_bot(fid):
     running_processes[fid] = {
         "container_name": container_name,
         "pid": pid,
-        "log_path": log_file,
+        "log_path": container_manager.get_log_path(user_id, fid),
         "file_path": container_path,
         "container_filename": container_filename,
-        "exec_id": exec_id
     }
 
     f["status"] = "running"
@@ -1507,13 +1447,11 @@ def stop_hosted_bot(fid):
         container_name = proc_info.get("container_name")
         pid = proc_info.get("pid")
         if container_name and pid and container_manager.is_available():
-            # قتل العملية داخل الحاوية
             user_id = f["owner"] if f else None
             if user_id:
                 container_manager.kill_process(user_id, pid)
                 logger.info(f"تم إيقاف البوت {fid} (PID: {pid}) في الحاوية {container_name}")
             else:
-                # محاولة العثور على المستخدم من الملف
                 if f:
                     user_id = f["owner"]
                     container_manager.kill_process(user_id, pid)
@@ -1573,10 +1511,10 @@ def billing_loop():
                 f = db["files"].get(fid)
                 if not f:
                     continue
-                # التحقق من استمرارية العملية داخل الحاوية
                 user_id = f["owner"]
                 pid = proc_info.get("pid")
                 if pid and container_manager.is_available():
+                    # استخدام الطريقة الجديدة للتحقق من العملية
                     if not container_manager.is_process_running(user_id, pid):
                         f["status"] = "stopped"
                         running_processes.pop(fid, None)
@@ -1584,29 +1522,24 @@ def billing_loop():
                         logger.warning(f"توقف البوت {fid} بشكل غير متوقع (PID: {pid})")
                         continue
                 else:
-                    # إذا لم نتمكن من التحقق، نعتبره متوقف
                     f["status"] = "stopped"
                     running_processes.pop(fid, None)
                     save_db()
                     continue
 
-                # تطبيق الفوترة
                 process_billing(fid, f)
         except Exception as e:
             logger.error(f"خطأ في حلقة الفوترة: {e}")
 
 
-# ===================== مراقبة المساحة الدورية =====================
-STORAGE_MONITOR_INTERVAL = 300  # كل 5 دقائق
+STORAGE_MONITOR_INTERVAL = 300
 
 def monitor_storage_loop():
-    """مراقبة استخدام المساحة لكل مستخدم وإيقاف البوتات التي تتجاوز الحد"""
     while True:
         try:
             time.sleep(STORAGE_MONITOR_INTERVAL)
             logger.info("بدء فحص المساحة للمستخدمين...")
 
-            # تجميع المستخدمين النشطين
             users_to_check = set()
             for fid, f in db["files"].items():
                 if f.get("status") == "running" or f.get("status") == "approved":
@@ -1616,7 +1549,6 @@ def monitor_storage_loop():
                 usage = container_manager.get_user_storage_usage(uid)
                 if usage > MAX_STORAGE_MB:
                     logger.warning(f"المستخدم {uid} تجاوز حد المساحة: {usage} ميجابايت / {MAX_STORAGE_MB} ميجابايت")
-                    # إيقاف جميع البوتات الخاصة بهذا المستخدم
                     for fid, f in list(db["files"].items()):
                         if f["owner"] == uid and f.get("status") == "running":
                             stop_hosted_bot(fid)
@@ -1864,7 +1796,6 @@ def show_file_log(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية لعرض السجل.")
         return
-    # مسار السجل داخل مجلد المستخدم
     log_path = container_manager.get_log_path(f["owner"], fid)
     if not os.path.exists(log_path):
         send_q(chat_id, "📋 لا يوجد سجل تشغيل لهذا البوت بعد.")
@@ -2103,7 +2034,6 @@ def handle_file_decision(chat_id, data):
         f["status"] = "approved"
         f["approved_at"] = now_iso()
         save_db()
-        # تشغيل البوت في خلفية لتجنب تأخير الرد على الـ callback
         threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
         send_q(chat_id, "✅ تمت الموافقة على الملف وجاري تشغيله في الخلفية.")
 
@@ -2633,7 +2563,6 @@ def callback_router(call):
     cooldown[user_id] = now
 
     try:
-        # تأكيد استلام الاستعلام فوراً
         bot.answer_callback_query(call.id)
 
         if data == "support":
@@ -2791,7 +2720,6 @@ def callback_router(call):
 
     except Exception as e:
         logger.error(f"خطأ في معالجة الـ callback {data} من المستخدم {user_id}: {e}")
-        # لا نستدعي answer_callback_query هنا لأنها قد تكون انتهت صلاحيتها، نكتفي بتسجيل الخطأ
         try:
             bot.send_message(chat_id, "حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى.")
         except:
