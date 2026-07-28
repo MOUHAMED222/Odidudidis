@@ -845,7 +845,6 @@ def main_menu_kb(user_id):
         types.InlineKeyboardButton("📜 القوانين", callback_data="rules", style="success"),
         types.InlineKeyboardButton("ℹ️ المساعدة", callback_data="help", style="success"),
     )
-    # زر جديد لإضافة المكتبات
     kb.add(
         types.InlineKeyboardButton("📦 إضافة مكاتب", callback_data="install_libs", style="primary"),
     )
@@ -1100,6 +1099,11 @@ class ContainerManager:
         os.makedirs(user_dir, exist_ok=True)
         for sub in ["files", "logs"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
+        # إنشاء دليل .local للمكتبات
+        local_dir = os.path.join(user_dir, ".local")
+        os.makedirs(local_dir, exist_ok=True)
+        site_packages = os.path.join(local_dir, "lib", "python3.11", "site-packages")
+        os.makedirs(site_packages, exist_ok=True)
 
     def get_user_storage_usage(self, user_id: str) -> int:
         user_dir = self.get_user_dir(user_id)
@@ -1209,7 +1213,11 @@ class ContainerManager:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app", env: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """
+        تنفيذ أمر داخل الحاوية مع إمكانية تمرير متغيرات البيئة.
+        إذا كان detach=True، يعيد exec_id، وإلا يعيد مخرجات الأمر.
+        """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
@@ -1220,6 +1228,7 @@ class ContainerManager:
                     container=container.id,
                     cmd=command,
                     workdir=workdir,
+                    environment=env or {}
                 )['Id']
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
@@ -1228,7 +1237,8 @@ class ContainerManager:
                     cmd=command,
                     workdir=workdir,
                     detach=False,
-                    stream=False
+                    stream=False,
+                    environment=env or {}
                 )
                 output = result.output.decode('utf-8').strip()
                 return output
@@ -1240,29 +1250,36 @@ class ContainerManager:
     def install_libraries_from_file(self, user_id: str, file_content: str) -> bool:
         """
         تثبيت المكتبات المذكورة في ملف txt (سطر لكل مكتبة) داخل حاوية المستخدم.
-        تستخدم pip install --user مع تعيين PYTHONUSERBASE إلى /app/.local.
+        يستخدم pip install --target /app/.local/lib/python3.11/site-packages.
         """
         if not self.is_available():
             return False
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # قراءة السطور وتنظيفها
             lines = [line.strip() for line in file_content.splitlines() if line.strip() and not line.startswith('#')]
             if not lines:
-                return True  # لا توجد مكتبات
-            
-            # نسخ المحتوى إلى ملف مؤقت داخل الحاوية
+                return True
+
+            # إنشاء دليل التثبيت إذا لم يكن موجوداً
+            self.run_command_in_container(user_id, "mkdir -p /app/.local/lib/python3.11/site-packages", detach=False)
+
+            # كتابة المحتوى إلى ملف مؤقت
             libs_file = "/app/files/user_libs.txt"
-            # كتابة الملف داخل الحاوية باستخدام echo
+            # نستخدم echo لإضافة كل سطر
             for lib in lines:
-                # نكتب سطراً سطراً لتجنب مشاكل الأقتباس
-                cmd = f"echo '{lib}' >> {libs_file}"
+                # هروب الاقتباسات
+                safe_lib = lib.replace("'", "'\\''")
+                cmd = f"echo '{safe_lib}' >> {libs_file}"
                 self.run_command_in_container(user_id, cmd, detach=False)
-            
-            # تثبيت المكتبات باستخدام --user مع PYTHONUSERBASE
-            install_cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r {libs_file}"
-            output = self.run_command_in_container(user_id, install_cmd, detach=False)
+
+            # تثبيت المكتبات باستخدام --target
+            target_dir = "/app/.local/lib/python3.11/site-packages"
+            install_cmd = f"pip install --target {target_dir} -r {libs_file}"
+            env = {
+                "PYTHONPATH": target_dir
+            }
+            output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
             if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
                 return True
@@ -1276,7 +1293,7 @@ class ContainerManager:
     # ---- تثبيت المكتبات المستوردة من الملف ----
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
         """
-        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية باستخدام --user.
+        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية باستخدام --target.
         """
         if not self.is_available():
             return False
@@ -1297,19 +1314,24 @@ class ContainerManager:
         
         logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
         
+        # إنشاء دليل التثبيت
+        target_dir = "/app/.local/lib/python3.11/site-packages"
+        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
+        
         failed = []
         for pkg in external_packages:
             install_name = PACKAGE_ALIASES.get(pkg, pkg)
-            # التحقق من التثبيت المسبق
-            check_cmd = f"PYTHONUSERBASE=/app/.local python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+            # التحقق من التثبيت المسبق (نبحث عن الدليل)
+            check_cmd = f"test -d {target_dir}/{pkg.replace('-', '_')} && echo installed || echo not_installed"
             check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
             if check_output and "installed" in check_output:
                 logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
                 continue
             
             logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
-            cmd = f"PYTHONUSERBASE=/app/.local pip install --user {install_name}"
-            output = self.run_command_in_container(user_id, cmd, detach=False)
+            cmd = f"pip install --target {target_dir} {install_name}"
+            env = {"PYTHONPATH": target_dir}
+            output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
             if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
             else:
@@ -1323,7 +1345,7 @@ class ContainerManager:
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
         """
-        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية باستخدام --user.
+        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية باستخدام --target.
         """
         if not self.is_available():
             return False
@@ -1337,8 +1359,11 @@ class ContainerManager:
             logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
             return False
 
-        cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r /app/files/requirements.txt"
-        output = self.run_command_in_container(user_id, cmd, detach=False)
+        target_dir = "/app/.local/lib/python3.11/site-packages"
+        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
+        cmd = f"pip install --target {target_dir} -r /app/files/requirements.txt"
+        env = {"PYTHONPATH": target_dir}
+        output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
         if output is not None:
             logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output[:200]}")
             return True
@@ -1348,7 +1373,7 @@ class ContainerManager:
 
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
-        تشغيل عملية في الحاوية مع تعيين PYTHONPATH و PYTHONUSERBASE.
+        تشغيل عملية في الحاوية مع تعيين PYTHONPATH لإضافة المكتبات المثبتة.
         """
         if not self.is_available():
             return None, None
@@ -1356,16 +1381,16 @@ class ContainerManager:
         try:
             container = self.docker_client.containers.get(container_name)
 
-            # تعيين متغيرات البيئة لتضمين مسار المكتبات المثبتة بواسطة --user
+            target_dir = "/app/.local/lib/python3.11/site-packages"
             env = {
+                "PYTHONPATH": target_dir,
                 "PYTHONUSERBASE": "/app/.local",
-                "PYTHONPATH": "/app/.local/lib/python3.11/site-packages",
                 "PATH": "/app/.local/bin:/usr/local/bin:/usr/bin:/bin"
             }
 
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            full_cmd = f"export PYTHONUSERBASE=/app/.local; export PYTHONPATH=/app/.local/lib/python3.11/site-packages; {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            full_cmd = f"export PYTHONPATH={target_dir}; export PYTHONUSERBASE=/app/.local; {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
             result = container.exec_run(
@@ -2832,7 +2857,6 @@ def callback_router(call):
             pending_action[user_id] = {"action": "awaiting_question"}
             send_q(chat_id, "💬 اكتب سؤالك الآن وسيصل مباشرة إلى الإدارة.")
 
-        # ===== زر إضافة المكتبات =====
         elif data == "install_libs":
             pending_action[user_id] = {"action": "awaiting_libs_file"}
             send_q(chat_id, "📤 أرسل ملف نصي (txt) يحتوي على أسماء المكتبات المراد تثبيتها، سطر لكل مكتبة.\nمثال:\n<code>requests\ntelebot\nnumpy</code>")
