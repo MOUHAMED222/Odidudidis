@@ -947,6 +947,9 @@ PACKAGE_ALIASES = {
     "PIL": "pillow",
     "telegram": "python-telegram-bot",
     "telegram.ext": "python-telegram-bot",
+    "telebot": "pyTelegramBotAPI",           # <--- إضافة هامة لـ telebot
+    "requests": "requests",
+    "sqlite3": "sqlite3",                   # مدمج لكن تضاف للتوضيح
 }
 
 def get_imports(file_path):
@@ -1159,7 +1162,7 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,                   # نظام الملفات الجذر للقراءة فقط
+                read_only=True,
                 tmpfs={
                     "/tmp": "rw,noexec,nosuid,size=64M"
                 },
