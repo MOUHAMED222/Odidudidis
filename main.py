@@ -1206,9 +1206,9 @@ class ContainerManager:
                 memswap_limit="1g",
             )
             container.start()
-            # تثبيت procps بشكل متزامن للتأكد من وجود pgrep و ps
+            # تثبيت procps بشكل صحيح (بدون وسيطات خاطئة)
             try:
-                install_cmd = "apt-get update -qq && apt-get install -y procps -qq"
+                install_cmd = "apt-get update && apt-get install -y procps"
                 output = self.run_command_in_container(user_id, install_cmd, detach=False)
                 if output is not None:
                     logger.info(f"تم تثبيت procps في الحاوية {container_name}: {output}")
@@ -1293,16 +1293,7 @@ class ContainerManager:
         """
         if not self.is_available():
             return None
-        # محاولة استخدام pgrep أولاً
-        cmd = f"pgrep -f '{process_pattern}'"
-        output = self.run_command_in_container(user_id, cmd, detach=False)
-        if output:
-            try:
-                pid = int(output.split()[0])
-                return pid
-            except (ValueError, IndexError):
-                pass
-        # في حال فشل pgrep، نستخدم طريقة Python للبحث في /proc
+        # الطريقة الموثوقة: استخدام python للبحث في /proc
         python_cmd = (
             f"python3 -c \"import os, glob; "
             f"for pid in glob.glob('/proc/[0-9]*'): "
@@ -1313,10 +1304,10 @@ class ContainerManager:
             f"        print(os.path.basename(pid)); break; "
             f"  except: pass\""
         )
-        output_py = self.run_command_in_container(user_id, python_cmd, detach=False)
-        if output_py:
+        output = self.run_command_in_container(user_id, python_cmd, detach=False)
+        if output:
             try:
-                pid = int(output_py.strip())
+                pid = int(output.strip())
                 return pid
             except (ValueError):
                 pass
@@ -1455,7 +1446,9 @@ def start_hosted_bot(fid):
     # تحديد مسار سجل الإخراج
     log_file = container_manager.get_log_path(user_id, fid)
     # تشغيل السكربت داخل الحاوية مع توجيه المخرجات
-    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1"
+    # نقوم بتشغيل البوت في الخلفية ونكتب PID في ملف
+    pid_file = f"/app/pid_{fid}.txt"
+    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1 & echo $! > {pid_file}"
     exec_id = container_manager.run_command_in_container(user_id, cmd, detach=True)
     if not exec_id:
         logger.error(f"فشل تشغيل البوت {fid} في الحاوية")
@@ -1463,12 +1456,21 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # الحصول على PID للعملية
-    pid = container_manager.get_process_pid(user_id, container_filename)
+    # انتظار لحين كتابة PID
+    time.sleep(2)
+    # قراءة PID من الملف
+    read_pid_cmd = f"cat {pid_file}"
+    pid_output = container_manager.run_command_in_container(user_id, read_pid_cmd, detach=False)
+    pid = None
+    if pid_output:
+        try:
+            pid = int(pid_output.strip())
+        except ValueError:
+            pass
+
     if not pid:
         logger.warning(f"لم يتم العثور على PID للبوت {fid}، قد يكون انتهى فوراً.")
         # نتحقق من وجود الملف السجل
-        time.sleep(2)
         if os.path.exists(log_file):
             with open(log_file, 'r') as lf:
                 content = lf.read()
@@ -1476,7 +1478,6 @@ def start_hosted_bot(fid):
                     logger.error(f"البوت {fid} انتهى بخطأ. السجل: {content[:200]}")
                     f["status"] = "stopped"
                     save_db()
-                    # إشعار المستخدم
                     try:
                         bot.send_message(
                             int(user_id),
@@ -1497,7 +1498,8 @@ def start_hosted_bot(fid):
         "log_path": log_file,
         "file_path": container_path,
         "container_filename": container_filename,
-        "exec_id": exec_id
+        "exec_id": exec_id,
+        "pid_file": pid_file
     }
 
     f["status"] = "running"
