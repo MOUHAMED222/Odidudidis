@@ -86,7 +86,7 @@ HELP_TEXT = """
 للمزيد من المساعدة، تواصل مع الإدارة.
 """
 
-# ===================== نظام الحماية (يتم تعريفه أولاً) =====================
+# ===================== نظام الحماية =====================
 try:
     from cryptography.fernet import Fernet
     CRYPTO_AVAILABLE = True
@@ -104,7 +104,6 @@ DECRYPTED_TEMP_DIR = "temp_decrypted"
 SECURITY_ACTIVATED = False
 
 def get_or_create_security_key():
-    """استرجاع أو توليد مفتاح الأمان."""
     if os.path.exists(SECURITY_KEY_FILE):
         with open(SECURITY_KEY_FILE, "rb") as f:
             key = f.read()
@@ -120,7 +119,6 @@ def get_or_create_security_key():
     return key
 
 def get_cipher():
-    """إرجاع كائن Fernet للتشفير."""
     if not CRYPTO_AVAILABLE:
         return None
     key = get_or_create_security_key()
@@ -129,14 +127,12 @@ def get_cipher():
     return None
 
 def encrypt_data(data: bytes) -> bytes:
-    """تشفير البيانات."""
     cipher = get_cipher()
     if cipher:
         return cipher.encrypt(data)
     return data
 
 def decrypt_data(data: bytes) -> bytes:
-    """فك تشفير البيانات."""
     cipher = get_cipher()
     if cipher:
         try:
@@ -147,7 +143,6 @@ def decrypt_data(data: bytes) -> bytes:
     return data
 
 def is_encrypted_file(filepath: str) -> bool:
-    """التحقق مما إذا كان الملف مشفرًا."""
     if not CRYPTO_AVAILABLE or not os.path.exists(filepath):
         return False
     try:
@@ -162,7 +157,6 @@ def is_encrypted_file(filepath: str) -> bool:
         return False
 
 def encrypt_file(filepath: str) -> bool:
-    """تشفير ملف وحفظه مع امتداد .enc، وحذف الأصل."""
     if not CRYPTO_AVAILABLE:
         return False
     try:
@@ -180,7 +174,6 @@ def encrypt_file(filepath: str) -> bool:
         return False
 
 def decrypt_file_to_temp(filepath: str) -> str:
-    """فك تشفير ملف إلى مجلد مؤقت."""
     if not CRYPTO_AVAILABLE or not os.path.exists(filepath):
         return filepath
     if not filepath.endswith(".enc"):
@@ -201,7 +194,6 @@ def decrypt_file_to_temp(filepath: str) -> str:
         return filepath
 
 def calculate_file_hash(filepath: str) -> str:
-    """حساب SHA-256 لملف."""
     if not os.path.exists(filepath):
         return ""
     hash_sha256 = hashlib.sha256()
@@ -215,7 +207,6 @@ def calculate_file_hash(filepath: str) -> str:
         return ""
 
 def update_integrity():
-    """تحديث ملف السلامة."""
     if not CRYPTO_AVAILABLE:
         return
     files_to_protect = [
@@ -243,7 +234,6 @@ def update_integrity():
         logger.error(f"فشل تحديث ملف السلامة: {e}")
 
 def check_integrity():
-    """التحقق من سلامة الملفات."""
     if not CRYPTO_AVAILABLE or not os.path.exists(INTEGRITY_FILE):
         return
     try:
@@ -272,7 +262,6 @@ def check_integrity():
         logger.info("✅ جميع الملفات سليمة.")
 
 def start_security_system():
-    """تشغيل نظام الحماية."""
     global SECURITY_ACTIVATED
     if SECURITY_ACTIVATED:
         return
@@ -303,12 +292,11 @@ def start_security_system():
     logger.info("✅ تم تفعيل نظام الحماية بنجاح.")
 
 def clean_temp_decrypted_files():
-    """تنظيف الملفات المؤقتة."""
     if os.path.exists(DECRYPTED_TEMP_DIR):
         shutil.rmtree(DECRYPTED_TEMP_DIR, ignore_errors=True)
         logger.info("تم تنظيف المجلد المؤقت.")
 
-# ===================== قاعدة البيانات (JSON) =====================
+# ===================== قاعدة البيانات =====================
 db_lock = threading.Lock()
 
 STATUS_AR = {
@@ -401,7 +389,6 @@ def migrate_db():
 
 migrate_db()
 
-# ===================== تعديل الإعدادات حسب المتطلبات الجديدة =====================
 db["settings"]["free_points"] = 100
 db["settings"]["referral_bonus"] = 15
 db["settings"]["daily_cost"] = 10
@@ -700,7 +687,6 @@ def send_to_trust_channel(text):
             pass
 
 
-# ===================== دالة الإرسال إلى قناة VIP =====================
 def send_to_vip_channel(text):
     if VIP_CHANNEL_ID is None:
         return
@@ -1233,41 +1219,64 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    # ===== الطرق الجديدة لاسترجاع PID والتحقق من العملية بدون الاعتماد على `ps` =====
-
-    def get_pid_from_container(self, user_id: str, fid: str) -> Optional[int]:
+    # ---- الطريقة الجديدة الموثوقة للحصول على PID ----
+    def start_process_and_get_pid(self, user_id: str, cmd: str, workdir: str = "/app") -> Optional[int]:
         """
-        استرجاع PID للعملية من ملف PID الذي يتم كتابته عند بدء البوت.
-        يستخدم `cat` داخل الحاوية لقراءة الملف.
+        تشغيل عملية في الحاوية والحصول على PID عن طريق كتابة PID إلى ملف
+        ثم قراءة الملف بعد بدء العملية.
         """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            pid_file = f"/app/logs/{fid}.pid"
-            # نستخدم exec_run لقراءة الملف
-            result = container.exec_run(cmd=["cat", pid_file], workdir="/app")
-            if result.exit_code == 0:
-                pid_str = result.output.decode('utf-8').strip()
-                if pid_str.isdigit():
-                    return int(pid_str)
-            return None
+            # إنشاء أمر يبدأ العملية في الخلفية، ويوجه المخرجات، ويكتب PID إلى ملف
+            # نستخدم sh -c لتجميع الأوامر
+            full_cmd = f"sh -c '{cmd} > /app/logs/process.log 2>&1 & echo $! > /app/logs/process.pid'"
+            # تنفيذ الأمر مع detach=False لانتظار الانتهاء
+            result = container.exec_run(
+                cmd=full_cmd,
+                workdir=workdir,
+                detach=False,
+                stream=False
+            )
+            if result.exit_code != 0:
+                logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
+                return None
+
+            # انتظار لحين كتابة ملف PID
+            time.sleep(1)
+
+            # قراءة ملف PID
+            pid_result = container.exec_run(
+                cmd=["cat", "/app/logs/process.pid"],
+                workdir=workdir,
+                detach=False,
+                stream=False
+            )
+            if pid_result.exit_code != 0:
+                logger.error("لم يتم العثور على ملف PID")
+                return None
+
+            pid_str = pid_result.output.decode('utf-8').strip()
+            if pid_str.isdigit():
+                return int(pid_str)
+            else:
+                logger.error(f"PID غير صالح: {pid_str}")
+                return None
         except Exception as e:
-            logger.error(f"خطأ في استرجاع PID من الحاوية: {e}")
+            logger.error(f"خطأ في start_process_and_get_pid: {e}")
             return None
 
     def is_process_running(self, user_id: str, pid: int) -> bool:
         """
-        التحقق من وجود عملية بواسطة `kill -0` (لا يتطلب `ps`).
-        يعيد True إذا كانت العملية موجودة، False خلاف ذلك.
+        التحقق من وجود عملية باستخدام `kill -0` (موجود في جميع الحاويات).
         """
         if not self.is_available() or not pid:
             return False
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # `kill -0` يتحقق من وجود العملية دون إرسال إشارة فعلياً
             result = container.exec_run(cmd=["sh", "-c", f"kill -0 {pid}"])
             return result.exit_code == 0
         except Exception as e:
@@ -1377,24 +1386,11 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # تشغيل البوت في الخلفية وكتابة PID إلى ملف
-    cmd = f"python3 /app/files/{container_filename} > /app/logs/{fid}.log 2>&1 & echo $!"
-    result = container_manager.run_command_in_container(user_id, cmd, detach=False)
-    if result is None:
-        logger.error(f"فشل تشغيل البوت {fid} في الحاوية")
-        f["status"] = "stopped"
-        save_db()
-        return
-
-    pid_str = result.strip()
-    if pid_str.isdigit():
-        pid = int(pid_str)
-    else:
-        pid = None
-
+    # تشغيل البوت باستخدام الطريقة الجديدة التي تحصل على PID موثوق
+    cmd = f"python3 /app/files/{container_filename}"
+    pid = container_manager.start_process_and_get_pid(user_id, cmd, workdir="/app")
     if pid is None:
         logger.warning(f"لم يتم الحصول على PID للبوت {fid}، قد يكون انتهى فوراً.")
-        # نتحقق من وجود ملف السجل للكشف عن الأخطاء
         log_file = container_manager.get_log_path(user_id, fid)
         if os.path.exists(log_file):
             with open(log_file, 'r') as lf:
@@ -1411,12 +1407,11 @@ def start_hosted_bot(fid):
                     except:
                         pass
                     return
-        # إذا لم نجد PID، نعتبره متوقف
         f["status"] = "stopped"
         save_db()
         return
 
-    # التحقق من أن العملية لا تزال تعمل (باستخدام kill -0)
+    # التحقق من أن العملية ما زالت تعمل
     if not container_manager.is_process_running(user_id, pid):
         logger.warning(f"البوت {fid} انتهى فوراً (PID {pid})")
         f["status"] = "stopped"
@@ -1514,7 +1509,6 @@ def billing_loop():
                 user_id = f["owner"]
                 pid = proc_info.get("pid")
                 if pid and container_manager.is_available():
-                    # استخدام الطريقة الجديدة للتحقق من العملية
                     if not container_manager.is_process_running(user_id, pid):
                         f["status"] = "stopped"
                         running_processes.pop(fid, None)
