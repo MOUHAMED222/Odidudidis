@@ -44,7 +44,7 @@ BACKUP_CHANNEL = os.environ["BACKUP_CHANNEL"]
 VIP_CHANNEL_ID = int(os.environ["VIP_CHANNEL_ID"])
 
 DB_FILE = "bot_database.json"
-UPLOADS_DIR = "uploads"
+UPLOADS_DIR = "uploads"  # سيتم استخدامه مؤقتاً فقط ثم نقل الملفات إلى مجلد المستخدم
 LOGS_DIR = "logs"
 BACKUP_DIR = "backups"
 
@@ -579,10 +579,14 @@ def check_force_sub(user_id):
 
 
 def clean_orphaned_files():
+    """تنظيف الملفات اليتيمة من مجلد uploads بعد نقلها إلى مجلدات المستخدمين."""
+    # هذه الوظيفة لم تعد ضرورية بعد انتقالنا إلى نظام المجلدات الخاصة،
+    # لكننا نبقيها لتنظيف أي بقايا قديمة.
     if not os.path.exists(UPLOADS_DIR):
         return
     for filename in os.listdir(UPLOADS_DIR):
         filepath = os.path.join(UPLOADS_DIR, filename)
+        # التحقق مما إذا كان الملف مرتبطاً بقاعدة البيانات
         found = False
         for fid, f in db["files"].items():
             if f.get("path") == filepath:
@@ -740,15 +744,19 @@ def auto_backup():
             logger.error(f"❌ خطأ في النسخ الاحتياطي التلقائي: {e}")
 
 def backup_uploaded_files():
-    if not os.path.exists(UPLOADS_DIR) or not os.listdir(UPLOADS_DIR):
+    # نحتاج إلى نسخ جميع مجلدات المستخدمين
+    if not os.path.exists(USER_DATA_DIR) or not os.listdir(USER_DATA_DIR):
         return None
     backup_path = os.path.join(BACKUP_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(UPLOADS_DIR):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, start=os.path.dirname(UPLOADS_DIR))
-                zipf.write(file_path, arcname)
+        for user_id in os.listdir(USER_DATA_DIR):
+            user_path = os.path.join(USER_DATA_DIR, user_id)
+            if os.path.isdir(user_path):
+                for root, dirs, files in os.walk(user_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, start=os.path.dirname(USER_DATA_DIR))
+                        zipf.write(file_path, arcname)
     return backup_path
 
 
@@ -763,11 +771,11 @@ def create_full_backup_and_send_to_channel(channel_input):
         with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             if os.path.exists(DB_FILE):
                 zipf.write(DB_FILE, os.path.basename(DB_FILE))
-            if os.path.exists(UPLOADS_DIR):
-                for root, _, files in os.walk(UPLOADS_DIR):
+            if os.path.exists(USER_DATA_DIR):
+                for root, _, files in os.walk(USER_DATA_DIR):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, start=os.path.dirname(UPLOADS_DIR))
+                        arcname = os.path.relpath(file_path, start=os.path.dirname(USER_DATA_DIR))
                         zipf.write(file_path, arcname)
             if os.path.exists(LOGS_DIR):
                 for root, _, files in os.walk(LOGS_DIR):
@@ -1089,20 +1097,20 @@ class ContainerManager:
         return self.docker_client is not None
 
     def get_user_dir(self, user_id: str) -> str:
+        """المسار المطلق لمجلد المستخدم على المضيف."""
         return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
 
     def get_user_container_name(self, user_id: str) -> str:
         return f"user_{user_id}"
 
     def ensure_user_dir(self, user_id: str):
+        """إنشاء مجلد المستخدم مع الأقسام الفرعية الضرورية."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        for sub in ["files", "logs"]:
+        for sub in ["files", "logs", ".local"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
-        # إنشاء دليل .local للمكتبات
-        local_dir = os.path.join(user_dir, ".local")
-        os.makedirs(local_dir, exist_ok=True)
-        site_packages = os.path.join(local_dir, "lib", "python3.11", "site-packages")
+        # إنشاء هيكل site-packages
+        site_packages = os.path.join(user_dir, ".local", "lib", "python3.11", "site-packages")
         os.makedirs(site_packages, exist_ok=True)
 
     def get_user_storage_usage(self, user_id: str) -> int:
@@ -1170,7 +1178,7 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,
+                read_only=True,          # نظام الملفات الجذر للقراءة فقط
                 tmpfs={
                     "/tmp": "rw,noexec,nosuid,size=64M"
                 },
@@ -1180,7 +1188,7 @@ class ContainerManager:
                 memswap_limit="1g",
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],
-                cap_add=["SETUID", "SETGID"],
+                cap_add=["SETUID", "SETGID"],  # ضروري لتشغيل بعض العمليات
             )
             container.start()
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
@@ -1191,6 +1199,10 @@ class ContainerManager:
 
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
         if not self.is_available():
+            return False
+        # التأكد من أن container_path يبدأ بـ /app/ (مجلد المستخدم)
+        if not container_path.startswith("/app/"):
+            logger.error(f"مسار غير مسموح به: {container_path}")
             return False
         container_name = self.get_user_container_name(user_id)
         try:
@@ -1214,10 +1226,6 @@ class ContainerManager:
             return False
 
     def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app", env: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """
-        تنفيذ أمر داخل الحاوية مع إمكانية تمرير متغيرات البيئة.
-        إذا كان detach=True، يعيد exec_id، وإلا يعيد مخرجات الأمر.
-        """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
@@ -1261,24 +1269,20 @@ class ContainerManager:
             if not lines:
                 return True
 
-            # إنشاء دليل التثبيت إذا لم يكن موجوداً
-            self.run_command_in_container(user_id, "mkdir -p /app/.local/lib/python3.11/site-packages", detach=False)
+            target_dir = "/app/.local/lib/python3.11/site-packages"
+            # إنشاء الدليل إذا لم يكن موجوداً
+            self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
 
             # كتابة المحتوى إلى ملف مؤقت
             libs_file = "/app/files/user_libs.txt"
-            # نستخدم echo لإضافة كل سطر
             for lib in lines:
-                # هروب الاقتباسات
                 safe_lib = lib.replace("'", "'\\''")
                 cmd = f"echo '{safe_lib}' >> {libs_file}"
                 self.run_command_in_container(user_id, cmd, detach=False)
 
             # تثبيت المكتبات باستخدام --target
-            target_dir = "/app/.local/lib/python3.11/site-packages"
             install_cmd = f"pip install --target {target_dir} -r {libs_file}"
-            env = {
-                "PYTHONPATH": target_dir
-            }
+            env = {"PYTHONPATH": target_dir}
             output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
             if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
@@ -1314,7 +1318,6 @@ class ContainerManager:
         
         logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
         
-        # إنشاء دليل التثبيت
         target_dir = "/app/.local/lib/python3.11/site-packages"
         self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
         
@@ -1458,6 +1461,26 @@ class ContainerManager:
     def get_log_path(self, user_id: str, file_id: str) -> str:
         return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
 
+    def cleanup_user_container(self, user_id: str):
+        """حذف حاوية المستخدم ومجلده بالكامل."""
+        try:
+            container_name = self.get_user_container_name(user_id)
+            if self.is_available():
+                try:
+                    container = self.docker_client.containers.get(container_name)
+                    container.stop(timeout=5)
+                    container.remove(force=True)
+                    logger.info(f"تم حذف حاوية المستخدم {user_id}")
+                except NotFound:
+                    pass
+            # حذف مجلد المستخدم
+            user_dir = self.get_user_dir(user_id)
+            if os.path.exists(user_dir):
+                shutil.rmtree(user_dir, ignore_errors=True)
+                logger.info(f"تم حذف مجلد المستخدم {user_id}")
+        except Exception as e:
+            logger.error(f"خطأ في تنظيف المستخدم {user_id}: {e}")
+
 
 container_manager = ContainerManager()
 
@@ -1469,6 +1492,7 @@ def start_hosted_bot(fid):
         return
 
     user_id = f["owner"]
+    # المسار المخزن في قاعدة البيانات هو المسار داخل مجلد المستخدم على المضيف
     original_path = f["path"]
     if not os.path.exists(original_path):
         logger.error(f"ملف البوت غير موجود: {original_path}")
@@ -1489,6 +1513,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
+    # فك التشفير إذا لزم الأمر
     if original_path.endswith(".enc"):
         temp_path = decrypt_file_to_temp(original_path)
     else:
@@ -1846,8 +1871,19 @@ def handle_document(message):
             os.remove(old_path)
         except Exception as e:
             logger.warning(f"فشل حذف الملف القديم {old_path}: {e}")
-        with open(old_path, "wb") as new_f:
+        # حفظ الملف الجديد في مجلد المستخدم
+        user_dir = container_manager.get_user_dir(str(user_id))
+        os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
+        new_path = os.path.join(user_dir, "files", f"{fid}_{doc.file_name}")
+        with open(new_path, "wb") as new_f:
             new_f.write(downloaded)
+        # إذا كان التشفير مفعلاً، نقوم بتشفير الملف
+        if CRYPTO_AVAILABLE:
+            if encrypt_file(new_path):
+                new_path = new_path + ".enc"
+            else:
+                logger.warning("فشل تشفير الملف المحدث، سيتم حفظه بدون تشفير.")
+        f["path"] = new_path
         f["filename"] = doc.file_name
         f["uploaded_at"] = now_iso()
         save_db()
@@ -1873,7 +1909,11 @@ def handle_document(message):
     file_info = bot.get_file(doc.file_id)
     downloaded = bot.download_file(file_info.file_path)
     fid = short_id()
-    save_path = os.path.join(UPLOADS_DIR, f"{fid}_{doc.file_name}")
+    # إنشاء مجلد المستخدم على المضيف
+    user_dir = container_manager.get_user_dir(str(user_id))
+    os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
+    # حفظ الملف في مجلد المستخدم
+    save_path = os.path.join(user_dir, "files", f"{fid}_{doc.file_name}")
     with open(save_path, "wb") as f:
         f.write(downloaded)
 
@@ -2294,6 +2334,7 @@ def handle_file_action(chat_id, user_id, data):
         threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
         send_q(chat_id, "▶️ جاري تشغيل البوت في الخلفية.")
     else:
+        # حذف البوت: إيقاف التشغيل وحذف الملف وتنظيف الحاوية
         stop_hosted_bot(fid)
         try:
             os.remove(f["path"])
@@ -2302,6 +2343,11 @@ def handle_file_action(chat_id, user_id, data):
         db["files"].pop(fid, None)
         save_db()
         send_q(chat_id, "🗑️ تم حذف الملف نهائياً.")
+        # تنظيف مجلد المستخدم إذا لم يعد لديه أي بوتات
+        user_id = str(user_id)
+        remaining = [f for f in db["files"].values() if f["owner"] == user_id]
+        if not remaining:
+            container_manager.cleanup_user_container(user_id)
 
 
 def handle_order_decision(chat_id, data):
