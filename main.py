@@ -1185,7 +1185,7 @@ class ContainerManager:
                 detach=True,
                 tty=True,
                 mem_limit="512m",
-                memswap_limit="1g",
+                memswap_limit="100g",
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],
                 cap_add=["SETUID", "SETGID"],  # ضروري لتشغيل بعض العمليات
