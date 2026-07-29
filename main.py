@@ -101,7 +101,7 @@ import base64
 
 SECURITY_KEY_FILE = "security.key"
 INTEGRITY_FILE = "integrity.json"
-DECRYPTED_TEMP_DIR = "temp_decrypted"
+DECRYPTED_TEMP_DIR = "temp_decrypted"  # سيتم استخدامه كاسم مجلد فرعي داخل مجلد المستخدم
 SECURITY_ACTIVATED = False
 
 def get_or_create_security_key():
@@ -174,7 +174,11 @@ def encrypt_file(filepath: str) -> bool:
         logger.error(f"فشل تشفير الملف {filepath}: {e}")
         return False
 
-def decrypt_file_to_temp(filepath: str) -> str:
+def decrypt_file_to_temp(filepath: str, user_id: str) -> str:
+    """
+    يفك تشفير الملف إذا كان مشفراً ويضعه في مجلد مؤقت داخل مجلد المستخدم.
+    يعيد المسار إلى الملف المفكوك.
+    """
     if not CRYPTO_AVAILABLE or not os.path.exists(filepath):
         return filepath
     if not filepath.endswith(".enc"):
@@ -183,9 +187,12 @@ def decrypt_file_to_temp(filepath: str) -> str:
         with open(filepath, "rb") as f:
             encrypted_data = f.read()
         decrypted_data = decrypt_data(encrypted_data)
-        os.makedirs(DECRYPTED_TEMP_DIR, exist_ok=True)
+        # إنشاء مجلد مؤقت داخل مجلد المستخدم
+        user_dir = container_manager.get_user_dir(user_id)  # container_manager معرف لاحقاً ولكننا سنستخدمه هنا
+        temp_dir = safe_join(user_dir, DECRYPTED_TEMP_DIR)
+        os.makedirs(temp_dir, exist_ok=True)
         original_name = os.path.basename(filepath.replace(".enc", ""))
-        temp_path = safe_join(DECRYPTED_TEMP_DIR, original_name)
+        temp_path = safe_join(temp_dir, original_name)
         with open(temp_path, "wb") as f:
             f.write(decrypted_data)
         logger.info(f"تم فك تشفير الملف إلى: {temp_path}")
@@ -293,9 +300,13 @@ def start_security_system():
     logger.info("✅ تم تفعيل نظام الحماية بنجاح.")
 
 def clean_temp_decrypted_files():
-    if os.path.exists(DECRYPTED_TEMP_DIR):
-        shutil.rmtree(DECRYPTED_TEMP_DIR, ignore_errors=True)
-        logger.info("تم تنظيف المجلد المؤقت.")
+    """تنظيف مجلدات temp_decrypted داخل كل مستخدم."""
+    if os.path.exists(USER_DATA_DIR):
+        for user_id in os.listdir(USER_DATA_DIR):
+            temp_dir = os.path.join(USER_DATA_DIR, user_id, DECRYPTED_TEMP_DIR)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.info(f"تم تنظيف المجلد المؤقت للمستخدم {user_id}")
 
 # ===================== دوال السلامة للمسارات =====================
 def safe_join(base: str, *paths: str) -> str:
@@ -1127,7 +1138,7 @@ class ContainerManager:
         """إنشاء مجلد المستخدم مع الأقسام الفرعية الضرورية."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        for sub in ["files", "logs", ".local"]:
+        for sub in ["files", "logs", ".local", DECRYPTED_TEMP_DIR]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
         site_packages = os.path.join(user_dir, ".local", "lib", "python3.11", "site-packages")
         os.makedirs(site_packages, exist_ok=True)
@@ -1219,11 +1230,9 @@ class ContainerManager:
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
         if not self.is_available():
             return False
-        # التأكد من أن container_path يبدأ بـ /app/
         if not container_path.startswith("/app/"):
             logger.error(f"مسار غير مسموح به: {container_path}")
             return False
-        # التأكد من أن local_path يقع ضمن مجلد المستخدم
         user_dir = self.get_user_dir(user_id)
         if not is_path_inside(user_dir, local_path):
             logger.error(f"محاولة نسخ ملف خارج نطاق المستخدم: {local_path}")
@@ -1315,7 +1324,6 @@ class ContainerManager:
         if not self.is_available():
             return False
 
-        # التأكد من أن file_path يقع ضمن مجلد المستخدم
         user_dir = self.get_user_dir(user_id)
         if not is_path_inside(user_dir, file_path):
             logger.error(f"محاولة تثبيت متطلبات من ملف خارج النطاق: {file_path}")
@@ -1372,7 +1380,6 @@ class ContainerManager:
         if not os.path.exists(req_file):
             return True
 
-        # التحقق من أن req_file يقع ضمن مجلد المستخدم
         user_dir = self.get_user_dir(user_id)
         if not is_path_inside(user_dir, req_file):
             logger.error(f"ملف requirements.txt خارج النطاق: {req_file}")
@@ -1479,7 +1486,7 @@ class ContainerManager:
     def get_log_path(self, user_id: str, file_id: str) -> str:
         """تعيد مسار سجل البوت مع تحقق أمني."""
         user_dir = self.get_user_dir(user_id)
-        safe_fid = os.path.basename(file_id)  # إزالة أي محاولة traversal
+        safe_fid = os.path.basename(file_id)
         return safe_join(user_dir, "logs", f"{safe_fid}.log")
 
     def cleanup_user_container(self, user_id: str):
@@ -1525,7 +1532,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # التأكد من أن الملف يقع ضمن مجلد المستخدم
     user_dir = container_manager.get_user_dir(user_id)
     if not is_path_inside(user_dir, original_path):
         logger.error(f"ملف البوت خارج نطاق المستخدم: {original_path}")
@@ -1547,12 +1553,13 @@ def start_hosted_bot(fid):
         save_db()
         return
 
+    # فك التشفير: استخدم user_id لضمان المسار داخل نطاق المستخدم
     if original_path.endswith(".enc"):
-        temp_path = decrypt_file_to_temp(original_path)
+        temp_path = decrypt_file_to_temp(original_path, user_id)
     else:
         temp_path = original_path
 
-    # التحقق من أن temp_path لا يزال ضمن النطاق بعد فك التشفير
+    # التحقق من أن temp_path داخل نطاق المستخدم (بعد فك التشفير أصبح ضمن user_dir/temp_decrypted)
     if not is_path_inside(user_dir, temp_path):
         logger.error(f"ملف مؤقت خارج النطاق: {temp_path}")
         f["status"] = "stopped"
@@ -1580,7 +1587,6 @@ def start_hosted_bot(fid):
             pass
         return
 
-    # استخدام اسم الملف بدون مسار
     safe_filename = os.path.basename(f['filename'])
     container_filename = f"{fid}_{safe_filename}"
     container_path = f"/app/files/{container_filename}"
@@ -2100,7 +2106,6 @@ def change_file_token(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
-    # التحقق من أن مسار الملف يقع ضمن مجلد المستخدم
     user_dir = container_manager.get_user_dir(str(user_id))
     if not is_path_inside(user_dir, f["path"]):
         send_q(chat_id, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
@@ -2390,7 +2395,6 @@ def handle_file_action(chat_id, user_id, data):
         send_q(chat_id, "▶️ جاري تشغيل البوت في الخلفية.")
     else:
         stop_hosted_bot(fid)
-        # التحقق من أن الملف يقع ضمن مجلد المستخدم قبل الحذف
         user_dir = container_manager.get_user_dir(str(user_id))
         if is_path_inside(user_dir, f["path"]):
             try:
@@ -3270,7 +3274,6 @@ def handle_pending_text(message):
                 reply_q(message, "🔒 ماعندكش الصلاحية.")
                 pending_action.pop(user_id, None)
                 return
-            # التحقق من المسار
             user_dir = container_manager.get_user_dir(str(user_id))
             if not is_path_inside(user_dir, f["path"]):
                 reply_q(message, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
