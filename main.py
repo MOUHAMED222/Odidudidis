@@ -1206,7 +1206,8 @@ class ContainerManager:
                 },
                 read_only=True,
                 tmpfs={
-                    "/tmp": "rw,noexec,nosuid,size=64M"
+                    "/tmp": "rw,noexec,nosuid,size=256M",
+                    "/root/.cache": "rw,noexec,nosuid,size=128M"
                 },
                 detach=True,
                 tty=True,
@@ -1287,33 +1288,39 @@ class ContainerManager:
     def install_libraries_from_file(self, user_id: str, file_content: str) -> bool:
         if not self.is_available():
             return False
-        container_name = self.get_user_container_name(user_id)
-        try:
-            container = self.docker_client.containers.get(container_name)
-            lines = [line.strip() for line in file_content.splitlines() if line.strip() and not line.startswith('#')]
-            if not lines:
-                return True
 
-            target_dir = "/app/.local/lib/python3.11/site-packages"
-            self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
+        # إنشاء الدليل /app/files إذا لم يكن موجوداً
+        self.run_command_in_container(user_id, "mkdir -p /app/files", detach=False)
 
-            libs_file = "/app/files/user_libs.txt"
-            for lib in lines:
-                safe_lib = lib.replace("'", "'\\''")
-                cmd = f"echo '{safe_lib}' >> {libs_file}"
-                self.run_command_in_container(user_id, cmd, detach=False)
+        # كتابة المحتوى إلى ملف داخل الحاوية باستخدام echo
+        lines = [line.strip() for line in file_content.splitlines() if line.strip() and not line.startswith('#')]
+        if not lines:
+            return True
 
-            install_cmd = f"pip install --target {target_dir} -r {libs_file}"
-            env = {"PYTHONPATH": target_dir}
-            output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
-            if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
-                logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
-                return True
-            else:
-                logger.error(f"❌ فشل تثبيت المكتبات للمستخدم {user_id}: {output}")
-                return False
-        except Exception as e:
-            logger.error(f"خطأ في install_libraries_from_file: {e}")
+        # استخدام printf لكتابة كل سطر بشكل آمن
+        libs_file = "/app/files/user_libs.txt"
+        # حذف الملف القديم إن وجد
+        self.run_command_in_container(user_id, f"rm -f {libs_file}", detach=False)
+        for lib in lines:
+            safe_lib = lib.replace("'", "'\\''")
+            cmd = f"printf '%s\\n' '{safe_lib}' >> {libs_file}"
+            self.run_command_in_container(user_id, cmd, detach=False)
+
+        target_dir = "/app/.local/lib/python3.11/site-packages"
+        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
+
+        # تعيين متغير البيئة PIP_CACHE_DIR إلى /tmp/pip-cache (قابل للكتابة)
+        env = {
+            "PYTHONPATH": target_dir,
+            "PIP_CACHE_DIR": "/tmp/pip-cache"
+        }
+        install_cmd = f"pip install --no-cache-dir --target {target_dir} -r {libs_file}"
+        output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
+        if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
+            logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
+            return True
+        else:
+            logger.error(f"❌ فشل تثبيت المكتبات للمستخدم {user_id}: {output}")
             return False
 
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
@@ -1344,9 +1351,16 @@ class ContainerManager:
         target_dir = "/app/.local/lib/python3.11/site-packages"
         self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
 
+        # تعيين متغير البيئة PIP_CACHE_DIR
+        env = {
+            "PYTHONPATH": target_dir,
+            "PIP_CACHE_DIR": "/tmp/pip-cache"
+        }
+
         failed = []
         for pkg in external_packages:
             install_name = PACKAGE_ALIASES.get(pkg, pkg)
+            # التحقق المسبق
             check_cmd = f"test -d {target_dir}/{pkg.replace('-', '_')} && echo installed || echo not_installed"
             check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
             if check_output and "installed" in check_output:
@@ -1354,8 +1368,7 @@ class ContainerManager:
                 continue
 
             logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
-            cmd = f"pip install --target {target_dir} {install_name}"
-            env = {"PYTHONPATH": target_dir}
+            cmd = f"pip install --no-cache-dir --target {target_dir} {install_name}"
             output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
             if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
@@ -1388,8 +1401,12 @@ class ContainerManager:
 
         target_dir = "/app/.local/lib/python3.11/site-packages"
         self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
-        cmd = f"pip install --target {target_dir} -r /app/files/requirements.txt"
-        env = {"PYTHONPATH": target_dir}
+
+        env = {
+            "PYTHONPATH": target_dir,
+            "PIP_CACHE_DIR": "/tmp/pip-cache"
+        }
+        cmd = f"pip install --no-cache-dir --target {target_dir} -r /app/files/requirements.txt"
         output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
         if output is not None:
             logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output[:200]}")
@@ -1549,7 +1566,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # فك التشفير إلى مجلد المستخدم نفسه
+    # فك التشفير إلى مجلد المستخدم نفسه إذا كان الملف مشفراً
     if original_path.endswith(".enc"):
         temp_path = decrypt_file_to_temp(original_path, user_dir)
     else:
@@ -1592,6 +1609,7 @@ def start_hosted_bot(fid):
         save_db()
         return
 
+    # تثبيت المتطلبات
     req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
     if not req_installed:
         logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
@@ -1653,6 +1671,23 @@ def start_hosted_bot(fid):
         f["status"] = "stopped"
         save_db()
         return
+
+    # بعد نجاح التشغيل، نقوم بتشفير الملف الأصلي إذا لم يكن مشفراً
+    # ولكن يجب أن نحرص على عدم تشفير الملف المؤقت المستخدم للتشغيل
+    # الملف الأصلي هو original_path، ولكن قد يكون هو نفسه temp_path إذا لم يكن مشفراً
+    # ولكننا نريد تشفير الملف الأصلي (غير المشفر) بعد بدء التشغيل
+    if not original_path.endswith(".enc") and CRYPTO_AVAILABLE:
+        # نحتاج إلى تشفير الملف الأصلي (غير المشفر) الموجود في user_dir/files/
+        # ولكن قد يكون الملف الأصلي هو نفسه temp_path، أو قد يكون مختلفاً إذا كان temp_path من فك تشفير سابق
+        # ولكننا هنا في حالة original_path غير مشفر، فهو الملف الذي سيتم تشفيره
+        # نتحقق من أن الملف لا يزال موجوداً
+        if os.path.exists(original_path):
+            # نقوم بتشفير الملف وتحديث المسار
+            if encrypt_file(original_path):
+                new_path = original_path + ".enc"
+                f["path"] = new_path
+                save_db()
+                logger.info(f"تم تشفير الملف الأصلي بعد التشغيل الناجح: {original_path} -> {new_path}")
 
     running_processes[fid] = {
         "container_name": container_name,
@@ -1927,11 +1962,7 @@ def handle_document(message):
         with open(new_path, "wb") as new_f:
             new_f.write(downloaded)
 
-        if CRYPTO_AVAILABLE:
-            if encrypt_file(new_path):
-                new_path = new_path + ".enc"
-            else:
-                logger.warning("فشل تشفير الملف المحدث، سيتم حفظه بدون تشفير.")
+        # لا نقوم بتشفير الملف هنا، سيتم تشفيره بعد التشغيل الناجح
         f["path"] = new_path
         f["filename"] = doc.file_name
         f["uploaded_at"] = now_iso()
@@ -1966,11 +1997,7 @@ def handle_document(message):
     with open(save_path, "wb") as f:
         f.write(downloaded)
 
-    if CRYPTO_AVAILABLE:
-        if encrypt_file(save_path):
-            save_path = save_path + ".enc"
-        else:
-            logger.warning("فشل تشفير الملف المرفوع، سيتم حفظه بدون تشفير.")
+    # لا نقوم بتشفير الملف هنا، سيتم تشفيره بعد التشغيل الناجح
 
     db["files"][fid] = {
         "owner": str(user_id),
