@@ -44,7 +44,7 @@ BACKUP_CHANNEL = os.environ["BACKUP_CHANNEL"]
 VIP_CHANNEL_ID = int(os.environ["VIP_CHANNEL_ID"])
 
 DB_FILE = "bot_database.json"
-UPLOADS_DIR = "uploads"  # سيتم استخدامه مؤقتاً فقط ثم نقل الملفات إلى مجلد المستخدم
+UPLOADS_DIR = "uploads"
 LOGS_DIR = "logs"
 BACKUP_DIR = "backups"
 
@@ -184,8 +184,8 @@ def decrypt_file_to_temp(filepath: str) -> str:
             encrypted_data = f.read()
         decrypted_data = decrypt_data(encrypted_data)
         os.makedirs(DECRYPTED_TEMP_DIR, exist_ok=True)
-        original_name = os.path.basename(filepath).replace(".enc", "")
-        temp_path = os.path.join(DECRYPTED_TEMP_DIR, original_name)
+        original_name = os.path.basename(filepath.replace(".enc", ""))
+        temp_path = safe_join(DECRYPTED_TEMP_DIR, original_name)
         with open(temp_path, "wb") as f:
             f.write(decrypted_data)
         logger.info(f"تم فك تشفير الملف إلى: {temp_path}")
@@ -296,6 +296,30 @@ def clean_temp_decrypted_files():
     if os.path.exists(DECRYPTED_TEMP_DIR):
         shutil.rmtree(DECRYPTED_TEMP_DIR, ignore_errors=True)
         logger.info("تم تنظيف المجلد المؤقت.")
+
+# ===================== دوال السلامة للمسارات =====================
+def safe_join(base: str, *paths: str) -> str:
+    """
+    تربط المسارات وتتحقق من أن المسار الناتج يقع ضمن base.
+    ترفع ValueError إذا كان هناك محاولة للخروج من base.
+    """
+    real_base = os.path.realpath(base)
+    joined = os.path.join(real_base, *paths)
+    real_joined = os.path.realpath(joined)
+    if not real_joined.startswith(real_base + os.sep):
+        raise ValueError(f"Path traversal attempt: '{joined}' is outside '{base}'")
+    return real_joined
+
+def is_path_inside(base: str, path: str) -> bool:
+    """
+    ترجع True إذا كان المسار path يقع ضمن base، وإلا False.
+    """
+    try:
+        real_base = os.path.realpath(base)
+        real_path = os.path.realpath(path)
+        return real_path.startswith(real_base + os.sep)
+    except Exception:
+        return False
 
 # ===================== قاعدة البيانات =====================
 db_lock = threading.Lock()
@@ -580,13 +604,10 @@ def check_force_sub(user_id):
 
 def clean_orphaned_files():
     """تنظيف الملفات اليتيمة من مجلد uploads بعد نقلها إلى مجلدات المستخدمين."""
-    # هذه الوظيفة لم تعد ضرورية بعد انتقالنا إلى نظام المجلدات الخاصة،
-    # لكننا نبقيها لتنظيف أي بقايا قديمة.
     if not os.path.exists(UPLOADS_DIR):
         return
     for filename in os.listdir(UPLOADS_DIR):
         filepath = os.path.join(UPLOADS_DIR, filename)
-        # التحقق مما إذا كان الملف مرتبطاً بقاعدة البيانات
         found = False
         for fid, f in db["files"].items():
             if f.get("path") == filepath:
@@ -744,7 +765,6 @@ def auto_backup():
             logger.error(f"❌ خطأ في النسخ الاحتياطي التلقائي: {e}")
 
 def backup_uploaded_files():
-    # نحتاج إلى نسخ جميع مجلدات المستخدمين
     if not os.path.exists(USER_DATA_DIR) or not os.listdir(USER_DATA_DIR):
         return None
     backup_path = os.path.join(BACKUP_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
@@ -1109,7 +1129,6 @@ class ContainerManager:
         os.makedirs(user_dir, exist_ok=True)
         for sub in ["files", "logs", ".local"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
-        # إنشاء هيكل site-packages
         site_packages = os.path.join(user_dir, ".local", "lib", "python3.11", "site-packages")
         os.makedirs(site_packages, exist_ok=True)
 
@@ -1178,7 +1197,7 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,          # نظام الملفات الجذر للقراءة فقط
+                read_only=True,
                 tmpfs={
                     "/tmp": "rw,noexec,nosuid,size=64M"
                 },
@@ -1188,7 +1207,7 @@ class ContainerManager:
                 memswap_limit="100g",
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],
-                cap_add=["SETUID", "SETGID"],  # ضروري لتشغيل بعض العمليات
+                cap_add=["SETUID", "SETGID"],
             )
             container.start()
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
@@ -1200,10 +1219,16 @@ class ContainerManager:
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
         if not self.is_available():
             return False
-        # التأكد من أن container_path يبدأ بـ /app/ (مجلد المستخدم)
+        # التأكد من أن container_path يبدأ بـ /app/
         if not container_path.startswith("/app/"):
             logger.error(f"مسار غير مسموح به: {container_path}")
             return False
+        # التأكد من أن local_path يقع ضمن مجلد المستخدم
+        user_dir = self.get_user_dir(user_id)
+        if not is_path_inside(user_dir, local_path):
+            logger.error(f"محاولة نسخ ملف خارج نطاق المستخدم: {local_path}")
+            return False
+
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
@@ -1254,12 +1279,7 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    # ---- تثبيت المكتبات من ملف txt داخل الحاوية ----
     def install_libraries_from_file(self, user_id: str, file_content: str) -> bool:
-        """
-        تثبيت المكتبات المذكورة في ملف txt (سطر لكل مكتبة) داخل حاوية المستخدم.
-        يستخدم pip install --target /app/.local/lib/python3.11/site-packages.
-        """
         if not self.is_available():
             return False
         container_name = self.get_user_container_name(user_id)
@@ -1270,17 +1290,14 @@ class ContainerManager:
                 return True
 
             target_dir = "/app/.local/lib/python3.11/site-packages"
-            # إنشاء الدليل إذا لم يكن موجوداً
             self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
 
-            # كتابة المحتوى إلى ملف مؤقت
             libs_file = "/app/files/user_libs.txt"
             for lib in lines:
                 safe_lib = lib.replace("'", "'\\''")
                 cmd = f"echo '{safe_lib}' >> {libs_file}"
                 self.run_command_in_container(user_id, cmd, detach=False)
 
-            # تثبيت المكتبات باستخدام --target
             install_cmd = f"pip install --target {target_dir} -r {libs_file}"
             env = {"PYTHONPATH": target_dir}
             output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
@@ -1294,43 +1311,44 @@ class ContainerManager:
             logger.error(f"خطأ في install_libraries_from_file: {e}")
             return False
 
-    # ---- تثبيت المكتبات المستوردة من الملف ----
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية باستخدام --target.
-        """
         if not self.is_available():
             return False
-        
+
+        # التأكد من أن file_path يقع ضمن مجلد المستخدم
+        user_dir = self.get_user_dir(user_id)
+        if not is_path_inside(user_dir, file_path):
+            logger.error(f"محاولة تثبيت متطلبات من ملف خارج النطاق: {file_path}")
+            return False
+
         imports = get_imports(file_path)
         if not imports:
             logger.info("لا توجد مكتبات مستوردة من الملف.")
             return True
-        
+
         external_packages = []
         for pkg in imports:
             if pkg not in BUILTIN_MODULES:
                 external_packages.append(pkg)
-        
+
         if not external_packages:
             logger.info("جميع المكتبات المستوردة هي مكتبات مدمجة، لا حاجة للتثبيت.")
             return True
-        
+
         logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
-        
+
         target_dir = "/app/.local/lib/python3.11/site-packages"
         self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
-        
+
         failed = []
         for pkg in external_packages:
             install_name = PACKAGE_ALIASES.get(pkg, pkg)
-            # التحقق من التثبيت المسبق (نبحث عن الدليل)
             check_cmd = f"test -d {target_dir}/{pkg.replace('-', '_')} && echo installed || echo not_installed"
             check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
             if check_output and "installed" in check_output:
                 logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
                 continue
-            
+
             logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
             cmd = f"pip install --target {target_dir} {install_name}"
             env = {"PYTHONPATH": target_dir}
@@ -1340,22 +1358,25 @@ class ContainerManager:
             else:
                 logger.error(f"❌ فشل تثبيت {install_name}: {output}")
                 failed.append(install_name)
-        
+
         if failed:
             logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
             return False
         return True
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية باستخدام --target.
-        """
         if not self.is_available():
             return False
         base_dir = os.path.dirname(file_path)
         req_file = os.path.join(base_dir, "requirements.txt")
         if not os.path.exists(req_file):
             return True
+
+        # التحقق من أن req_file يقع ضمن مجلد المستخدم
+        user_dir = self.get_user_dir(user_id)
+        if not is_path_inside(user_dir, req_file):
+            logger.error(f"ملف requirements.txt خارج النطاق: {req_file}")
+            return False
 
         container_path = f"/app/files/requirements.txt"
         if not self.copy_file_to_container(user_id, req_file, container_path):
@@ -1375,9 +1396,6 @@ class ContainerManager:
             return False
 
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
-        """
-        تشغيل عملية في الحاوية مع تعيين PYTHONPATH لإضافة المكتبات المثبتة.
-        """
         if not self.is_available():
             return None, None
         container_name = self.get_user_container_name(user_id)
@@ -1459,7 +1477,10 @@ class ContainerManager:
         return result is not None
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
-        return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
+        """تعيد مسار سجل البوت مع تحقق أمني."""
+        user_dir = self.get_user_dir(user_id)
+        safe_fid = os.path.basename(file_id)  # إزالة أي محاولة traversal
+        return safe_join(user_dir, "logs", f"{safe_fid}.log")
 
     def cleanup_user_container(self, user_id: str):
         """حذف حاوية المستخدم ومجلده بالكامل."""
@@ -1473,7 +1494,6 @@ class ContainerManager:
                     logger.info(f"تم حذف حاوية المستخدم {user_id}")
                 except NotFound:
                     pass
-            # حذف مجلد المستخدم
             user_dir = self.get_user_dir(user_id)
             if os.path.exists(user_dir):
                 shutil.rmtree(user_dir, ignore_errors=True)
@@ -1484,7 +1504,7 @@ class ContainerManager:
 
 container_manager = ContainerManager()
 
-# ===================== دوال استضافة الملفات (معدلة للعمل بالحاويات) =====================
+# ===================== دوال استضافة الملفات =====================
 
 def start_hosted_bot(fid):
     f = db["files"].get(fid)
@@ -1492,7 +1512,6 @@ def start_hosted_bot(fid):
         return
 
     user_id = f["owner"]
-    # المسار المخزن في قاعدة البيانات هو المسار داخل مجلد المستخدم على المضيف
     original_path = f["path"]
     if not os.path.exists(original_path):
         logger.error(f"ملف البوت غير موجود: {original_path}")
@@ -1506,6 +1525,21 @@ def start_hosted_bot(fid):
         save_db()
         return
 
+    # التأكد من أن الملف يقع ضمن مجلد المستخدم
+    user_dir = container_manager.get_user_dir(user_id)
+    if not is_path_inside(user_dir, original_path):
+        logger.error(f"ملف البوت خارج نطاق المستخدم: {original_path}")
+        f["status"] = "stopped"
+        save_db()
+        try:
+            bot.send_message(
+                int(user_id),
+                "❌ حدث خطأ في مسار ملف البوت، يرجى إعادة رفعه."
+            )
+        except:
+            pass
+        return
+
     container_name = container_manager.ensure_container(user_id)
     if not container_name:
         logger.error(f"فشل إنشاء حاوية للمستخدم {user_id}")
@@ -1513,11 +1547,24 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # فك التشفير إذا لزم الأمر
     if original_path.endswith(".enc"):
         temp_path = decrypt_file_to_temp(original_path)
     else:
         temp_path = original_path
+
+    # التحقق من أن temp_path لا يزال ضمن النطاق بعد فك التشفير
+    if not is_path_inside(user_dir, temp_path):
+        logger.error(f"ملف مؤقت خارج النطاق: {temp_path}")
+        f["status"] = "stopped"
+        save_db()
+        try:
+            bot.send_message(
+                int(user_id),
+                "❌ حدث خطأ في فك تشفير الملف، يرجى إعادة رفعه."
+            )
+        except:
+            pass
+        return
 
     file_size_mb = os.path.getsize(temp_path) // (1024 * 1024)
     if not container_manager.enforce_storage_limit(user_id, file_size_mb):
@@ -1533,7 +1580,9 @@ def start_hosted_bot(fid):
             pass
         return
 
-    container_filename = f"{fid}_{f['filename']}"
+    # استخدام اسم الملف بدون مسار
+    safe_filename = os.path.basename(f['filename'])
+    container_filename = f"{fid}_{safe_filename}"
     container_path = f"/app/files/{container_filename}"
     if not container_manager.copy_file_to_container(user_id, temp_path, container_path):
         logger.error(f"فشل نسخ الملف إلى حاوية المستخدم {user_id}")
@@ -1541,7 +1590,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # ===== تثبيت المتطلبات: محاولة requirements.txt أولاً، ثم المكتبات المستوردة =====
     req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
     if not req_installed:
         logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
@@ -1819,7 +1867,6 @@ def handle_document(message):
 
     action_data = pending_action.get(user_id, {})
     
-    # ===== معالجة رفع ملف المكتبات =====
     if action_data.get("action") == "awaiting_libs_file":
         doc = message.document
         if not doc.file_name.endswith(".txt"):
@@ -1834,14 +1881,12 @@ def handle_document(message):
             reply_q(message, "❌ الملف ليس نصياً صالحاً.")
             return
         
-        # التأكد من وجود حاوية للمستخدم
         container_name = container_manager.ensure_container(str(user_id))
         if not container_name:
             reply_q(message, "❌ فشل إنشاء الحاوية لتثبيت المكتبات.")
             pending_action.pop(user_id, None)
             return
         
-        # تثبيت المكتبات
         msg = bot.send_message(message.chat.id, "⏳ جاري تثبيت المكتبات، يرجى الانتظار...")
         success = container_manager.install_libraries_from_file(str(user_id), content)
         if success:
@@ -1852,7 +1897,6 @@ def handle_document(message):
         pending_action.pop(user_id, None)
         return
 
-    # ===== معالجة تحديث الملف =====
     if action_data.get("action") == "awaiting_file_update":
         fid = action_data.get("fid")
         if not fid or fid not in db["files"]:
@@ -1871,13 +1915,16 @@ def handle_document(message):
             os.remove(old_path)
         except Exception as e:
             logger.warning(f"فشل حذف الملف القديم {old_path}: {e}")
-        # حفظ الملف الجديد في مجلد المستخدم
+
         user_dir = container_manager.get_user_dir(str(user_id))
         os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
-        new_path = os.path.join(user_dir, "files", f"{fid}_{doc.file_name}")
+        safe_filename = os.path.basename(doc.file_name)
+        new_filename = f"{fid}_{safe_filename}"
+        new_path = safe_join(user_dir, "files", new_filename)
+
         with open(new_path, "wb") as new_f:
             new_f.write(downloaded)
-        # إذا كان التشفير مفعلاً، نقوم بتشفير الملف
+
         if CRYPTO_AVAILABLE:
             if encrypt_file(new_path):
                 new_path = new_path + ".enc"
@@ -1891,7 +1938,6 @@ def handle_document(message):
         pending_action.pop(user_id, None)
         return
 
-    # ===== رفع ملف البوت الرئيسي =====
     if pending_action.get(user_id, {}).get("action") != "awaiting_file":
         reply_q(message, "📎 خاصك تضغط أولاً على «رفع ملف 📤» من القائمة قبل إرسال الملف.")
         return
@@ -1909,11 +1955,12 @@ def handle_document(message):
     file_info = bot.get_file(doc.file_id)
     downloaded = bot.download_file(file_info.file_path)
     fid = short_id()
-    # إنشاء مجلد المستخدم على المضيف
     user_dir = container_manager.get_user_dir(str(user_id))
     os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
-    # حفظ الملف في مجلد المستخدم
-    save_path = os.path.join(user_dir, "files", f"{fid}_{doc.file_name}")
+    safe_filename = os.path.basename(doc.file_name)
+    filename = f"{fid}_{safe_filename}"
+    save_path = safe_join(user_dir, "files", filename)
+
     with open(save_path, "wb") as f:
         f.write(downloaded)
 
@@ -2053,6 +2100,11 @@ def change_file_token(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
+    # التحقق من أن مسار الملف يقع ضمن مجلد المستخدم
+    user_dir = container_manager.get_user_dir(str(user_id))
+    if not is_path_inside(user_dir, f["path"]):
+        send_q(chat_id, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
+        return
     pending_action[user_id] = {"action": "awaiting_token_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل التوكن الجديد (مثال: <code>123456:ABC-DEF</code>):")
 
@@ -2064,6 +2116,10 @@ def change_file_admin(chat_id, user_id, fid):
         return
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
+        return
+    user_dir = container_manager.get_user_dir(str(user_id))
+    if not is_path_inside(user_dir, f["path"]):
+        send_q(chat_id, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
         return
     pending_action[user_id] = {"action": "awaiting_admin_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل معرف الأدمن الجديد (رقم فقط):")
@@ -2156,7 +2212,6 @@ def handle_daily_gift(chat_id, user_id):
     send_q(chat_id, f"🎁 مبروك! تربحت {gift} نقطة. رصيدك الحالي ولى {u['points']} نقطة.")
 
 
-# ===== معالجة خطط VIP =====
 def show_vip_plans(chat_id):
     vips = db["settings"].get("vip_plans", [])
     if not vips:
@@ -2334,20 +2389,23 @@ def handle_file_action(chat_id, user_id, data):
         threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
         send_q(chat_id, "▶️ جاري تشغيل البوت في الخلفية.")
     else:
-        # حذف البوت: إيقاف التشغيل وحذف الملف وتنظيف الحاوية
         stop_hosted_bot(fid)
-        try:
-            os.remove(f["path"])
-        except Exception as e:
-            logger.error(f"فشل حذف الملف {f['path']}: {e}")
+        # التحقق من أن الملف يقع ضمن مجلد المستخدم قبل الحذف
+        user_dir = container_manager.get_user_dir(str(user_id))
+        if is_path_inside(user_dir, f["path"]):
+            try:
+                os.remove(f["path"])
+            except Exception as e:
+                logger.error(f"فشل حذف الملف {f['path']}: {e}")
+        else:
+            logger.warning(f"محاولة حذف ملف خارج النطاق: {f['path']}")
         db["files"].pop(fid, None)
         save_db()
         send_q(chat_id, "🗑️ تم حذف الملف نهائياً.")
-        # تنظيف مجلد المستخدم إذا لم يعد لديه أي بوتات
-        user_id = str(user_id)
-        remaining = [f for f in db["files"].values() if f["owner"] == user_id]
+        user_id_str = str(user_id)
+        remaining = [f for f in db["files"].values() if f["owner"] == user_id_str]
         if not remaining:
-            container_manager.cleanup_user_container(user_id)
+            container_manager.cleanup_user_container(user_id_str)
 
 
 def handle_order_decision(chat_id, data):
@@ -3212,6 +3270,12 @@ def handle_pending_text(message):
                 reply_q(message, "🔒 ماعندكش الصلاحية.")
                 pending_action.pop(user_id, None)
                 return
+            # التحقق من المسار
+            user_dir = container_manager.get_user_dir(str(user_id))
+            if not is_path_inside(user_dir, f["path"]):
+                reply_q(message, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
+                pending_action.pop(user_id, None)
+                return
             new_token = message.text.strip()
             try:
                 with open(f["path"], "r", encoding="utf-8") as file:
@@ -3238,6 +3302,11 @@ def handle_pending_text(message):
             f = db["files"][fid]
             if str(user_id) != f["owner"] and not is_admin(user_id):
                 reply_q(message, "🔒 ماعندكش الصلاحية.")
+                pending_action.pop(user_id, None)
+                return
+            user_dir = container_manager.get_user_dir(str(user_id))
+            if not is_path_inside(user_dir, f["path"]):
+                reply_q(message, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
                 pending_action.pop(user_id, None)
                 return
             new_admin = message.text.strip()
