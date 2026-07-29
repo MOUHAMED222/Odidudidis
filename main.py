@@ -101,7 +101,7 @@ import base64
 
 SECURITY_KEY_FILE = "security.key"
 INTEGRITY_FILE = "integrity.json"
-DECRYPTED_TEMP_DIR = "temp_decrypted"  # سيتم استخدامه كاسم مجلد فرعي داخل مجلد المستخدم
+DECRYPTED_TEMP_DIR = "temp_decrypted"
 SECURITY_ACTIVATED = False
 
 def get_or_create_security_key():
@@ -174,10 +174,10 @@ def encrypt_file(filepath: str) -> bool:
         logger.error(f"فشل تشفير الملف {filepath}: {e}")
         return False
 
-def decrypt_file_to_temp(filepath: str, user_id: str) -> str:
+def decrypt_file_to_temp(filepath: str, base_dir: str = None) -> str:
     """
-    يفك تشفير الملف إذا كان مشفراً ويضعه في مجلد مؤقت داخل مجلد المستخدم.
-    يعيد المسار إلى الملف المفكوك.
+    فك تشفير الملف إلى مجلد مؤقت. إذا لم يتم تحديد base_dir، يستخدم المجلد العام.
+    يتحقق من أن المسار الناتج يقع ضمن base_dir.
     """
     if not CRYPTO_AVAILABLE or not os.path.exists(filepath):
         return filepath
@@ -187,12 +187,12 @@ def decrypt_file_to_temp(filepath: str, user_id: str) -> str:
         with open(filepath, "rb") as f:
             encrypted_data = f.read()
         decrypted_data = decrypt_data(encrypted_data)
-        # إنشاء مجلد مؤقت داخل مجلد المستخدم
-        user_dir = container_manager.get_user_dir(user_id)  # container_manager معرف لاحقاً ولكننا سنستخدمه هنا
-        temp_dir = safe_join(user_dir, DECRYPTED_TEMP_DIR)
-        os.makedirs(temp_dir, exist_ok=True)
+        if base_dir is None:
+            base_dir = DECRYPTED_TEMP_DIR
+        os.makedirs(base_dir, exist_ok=True)
         original_name = os.path.basename(filepath.replace(".enc", ""))
-        temp_path = safe_join(temp_dir, original_name)
+        # استخدام safe_join لضمان عدم الخروج من base_dir
+        temp_path = safe_join(base_dir, original_name)
         with open(temp_path, "wb") as f:
             f.write(decrypted_data)
         logger.info(f"تم فك تشفير الملف إلى: {temp_path}")
@@ -300,13 +300,9 @@ def start_security_system():
     logger.info("✅ تم تفعيل نظام الحماية بنجاح.")
 
 def clean_temp_decrypted_files():
-    """تنظيف مجلدات temp_decrypted داخل كل مستخدم."""
-    if os.path.exists(USER_DATA_DIR):
-        for user_id in os.listdir(USER_DATA_DIR):
-            temp_dir = os.path.join(USER_DATA_DIR, user_id, DECRYPTED_TEMP_DIR)
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.info(f"تم تنظيف المجلد المؤقت للمستخدم {user_id}")
+    if os.path.exists(DECRYPTED_TEMP_DIR):
+        shutil.rmtree(DECRYPTED_TEMP_DIR, ignore_errors=True)
+        logger.info("تم تنظيف المجلد المؤقت العام.")
 
 # ===================== دوال السلامة للمسارات =====================
 def safe_join(base: str, *paths: str) -> str:
@@ -1138,7 +1134,7 @@ class ContainerManager:
         """إنشاء مجلد المستخدم مع الأقسام الفرعية الضرورية."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        for sub in ["files", "logs", ".local", DECRYPTED_TEMP_DIR]:
+        for sub in ["files", "logs", ".local"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
         site_packages = os.path.join(user_dir, ".local", "lib", "python3.11", "site-packages")
         os.makedirs(site_packages, exist_ok=True)
@@ -1553,13 +1549,13 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # فك التشفير: استخدم user_id لضمان المسار داخل نطاق المستخدم
+    # فك التشفير إلى مجلد المستخدم نفسه
     if original_path.endswith(".enc"):
-        temp_path = decrypt_file_to_temp(original_path, user_id)
+        temp_path = decrypt_file_to_temp(original_path, user_dir)
     else:
         temp_path = original_path
 
-    # التحقق من أن temp_path داخل نطاق المستخدم (بعد فك التشفير أصبح ضمن user_dir/temp_decrypted)
+    # التحقق من أن temp_path لا يزال ضمن النطاق
     if not is_path_inside(user_dir, temp_path):
         logger.error(f"ملف مؤقت خارج النطاق: {temp_path}")
         f["status"] = "stopped"
