@@ -29,7 +29,6 @@ from telebot.apihelper import ApiTelegramException
 LOG_FILE = os.path.join("logs", "bot.log")
 os.makedirs("logs", exist_ok=True)
 
-# إعداد معالج تدوير السجلات (10 ميجابايت لكل ملف، احتفاظ بـ 5 نسخ)
 handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
 logging.basicConfig(
     level=logging.INFO,
@@ -392,7 +391,6 @@ def migrate_db():
 
 migrate_db()
 
-# تحديث بعض القيم الافتراضية
 db["settings"]["free_points"] = 100
 db["settings"]["referral_bonus"] = 15
 db["settings"]["daily_cost"] = 10
@@ -578,6 +576,20 @@ def clean_orphaned_files():
                 logger.info(f"تم حذف الملف اليتيم: {filepath}")
             except Exception as e:
                 logger.error(f"فشل حذف الملف اليتيم {filepath}: {e}")
+
+def cleanup_missing_files_from_db():
+    """حذف الإدخالات في قاعدة البيانات التي تشير إلى ملفات غير موجودة."""
+    to_remove = []
+    for fid, f in db["files"].items():
+        filepath = f.get("path")
+        if filepath and not os.path.exists(filepath):
+            logger.warning(f"الملف غير موجود: {filepath}، سيتم إزالة الإدخال {fid}")
+            to_remove.append(fid)
+    for fid in to_remove:
+        db["files"].pop(fid, None)
+    if to_remove:
+        save_db()
+        logger.info(f"تم إزالة {len(to_remove)} إدخالاً للملفات غير الموجودة.")
 
 # ===================== دوال قناة الثقة =====================
 def _parse_chat_identifier(raw):
@@ -898,7 +910,7 @@ def admin_menu_kb():
     )
     return kb
 
-# ===================== دوال تثبيت المكتبات (مطورة بشكل كبير) =====================
+# ===================== دوال تثبيت المكتبات (حل جذري) =====================
 BUILTIN_MODULES = {
     'sys', 'os', 're', 'json', 'time', 'datetime', 'typing', 'collections',
     'itertools', 'math', 'random', 'string', 'logging', 'io', 'zipfile', 'csv',
@@ -916,7 +928,6 @@ BUILTIN_MODULES = {
     'ctypes', 'cProfile', 'pstats', 'trace', 'turtle', 'tkinter', 'webbrowser'
 }
 
-# قائمة واسعة من الأسماء البديلة للمكتبات الشائعة
 PACKAGE_ALIASES = {
     "dateutil": "python-dateutil",
     "yaml": "pyyaml",
@@ -1039,7 +1050,6 @@ def get_imports(file_path):
         tree = ast.parse(content)
     except SyntaxError as e:
         logger.error(f"خطأ في تحليل الملف {file_path}: {e}")
-        # محاولة استخراج عبر التعبيرات النمطية كحل بديل
         pattern = r'^\s*(?:from\s+([a-zA-Z0-9_.]+)\s+import|import\s+([a-zA-Z0-9_.]+))'
         for line in content.splitlines():
             match = re.match(pattern, line)
@@ -1058,14 +1068,12 @@ def get_imports(file_path):
             if node.module:
                 module_name = node.module.split('.')[0]
                 imports.add(module_name)
-        # استيراد ديناميكي (__import__)
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == '__import__':
                 if node.args:
                     arg = node.args[0]
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                         imports.add(arg.value.split('.')[0])
-        # importlib.import_module
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if (isinstance(node.func.value, ast.Name) and node.func.value.id == 'importlib'
@@ -1074,7 +1082,6 @@ def get_imports(file_path):
                         arg = node.args[0]
                         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                             imports.add(arg.value.split('.')[0])
-
     return imports
 
 def get_python_version_in_container(container_manager, user_id):
@@ -1087,43 +1094,48 @@ def get_python_version_in_container(container_manager, user_id):
                 return version
     except Exception as e:
         logger.error(f"فشل الحصول على إصدار بايثون للمستخدم {user_id}: {e}")
-    return "3.11"  # افتراضي
+    return "3.11"
 
 def install_package_with_retries(container_manager, user_id, package_name, install_name=None, retries=3):
-    """محاولة تثبيت حزمة مع عدة محاولات وأسماء بديلة، مع استخدام --user و PYTHONUSERBASE."""
+    """محاولة تثبيت حزمة مع عدة محاولات، باستخدام environment بشكل صحيح."""
     if install_name is None:
         install_name = package_name
 
-    # تأكد من وجود دليل .local
-    container_manager.ensure_user_dir(user_id)  # هذا يؤكد وجود /app/user_id/... لكننا نريد /app/.local داخل الحاوية
-    # بدلاً من ذلك، نقوم بإنشاء /app/.local عن بعد باستخدام أمر
+    # التأكد من وجود دليل .local داخل الحاوية
     container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
 
     for attempt in range(1, retries + 1):
         try:
             upgrade_flag = " --upgrade" if attempt == retries else ""
-            # تعيين PYTHONUSERBASE و استخدام --user
-            cmd = f"PYTHONUSERBASE=/app/.local pip install --user {install_name}{upgrade_flag} --no-cache-dir"
+            # استخدام environment بدلاً من تعيين المتغيرات في الأمر
+            cmd = f"pip install --user {install_name}{upgrade_flag} --no-cache-dir"
+            env = {
+                'PYTHONUSERBASE': '/app/.local',
+                'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'
+            }
             logger.info(f"محاولة {attempt}/{retries} تثبيت {install_name} (المطلوب: {package_name})")
-            output = container_manager.run_command_in_container(user_id, cmd, detach=False)
+            output = container_manager.run_command_in_container(
+                user_id, cmd, detach=False, environment=env
+            )
             if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
                 logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
                 return True
             else:
                 logger.warning(f"فشل تثبيت {install_name} في المحاولة {attempt}: {output}")
-                # جرب اسم بديل إذا كان موجوداً
                 if attempt == 1 and install_name != package_name:
                     alt_name = package_name
                     if alt_name != install_name:
                         logger.info(f"محاولة التثبيت بالاسم الأصلي: {alt_name}")
-                        cmd2 = f"PYTHONUSERBASE=/app/.local pip install --user {alt_name} --no-cache-dir"
-                        output2 = container_manager.run_command_in_container(user_id, cmd2, detach=False)
+                        cmd2 = f"pip install --user {alt_name} --no-cache-dir"
+                        output2 = container_manager.run_command_in_container(
+                            user_id, cmd2, detach=False, environment=env
+                        )
                         if output2 and ("Successfully installed" in output2 or "Requirement already satisfied" in output2):
                             logger.info(f"✅ تم تثبيت {alt_name} بنجاح.")
                             return True
         except Exception as e:
             logger.error(f"خطأ أثناء تثبيت {install_name}: {e}")
-        time.sleep(2)  # انتظار قبل المحاولة التالية
+        time.sleep(2)
     return False
 
 def install_requirements_in_container(container_manager, user_id, file_path) -> bool:
@@ -1133,29 +1145,26 @@ def install_requirements_in_container(container_manager, user_id, file_path) -> 
     base_dir = os.path.dirname(file_path)
     req_file = os.path.join(base_dir, "requirements.txt")
     if not os.path.exists(req_file):
-        return True  # لا يوجد ملف، نعتبر ناجحاً
+        return True
 
     container_path = f"/app/files/requirements.txt"
     if not container_manager.copy_file_to_container(user_id, req_file, container_path):
         logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
         return False
 
-    # تأكد من وجود دليل .local
     container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
+    env = {'PYTHONUSERBASE': '/app/.local', 'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'}
 
-    # محاولة تثبيت باستخدام الملف كاملاً
-    cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r /app/files/requirements.txt --no-cache-dir"
-    output = container_manager.run_command_in_container(user_id, cmd, detach=False)
+    cmd = f"pip install --user -r /app/files/requirements.txt --no-cache-dir"
+    output = container_manager.run_command_in_container(user_id, cmd, detach=False, environment=env)
     if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
         logger.info(f"تم تثبيت المتطلبات من requirements.txt للمستخدم {user_id}")
         return True
     else:
-        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت كل مكتبة على حدة.")
-        # فشل التثبيت الكامل، نحاول تثبيت كل مكتبة بشكل فردي
+        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt، سنحاول تثبيت كل مكتبة على حدة.")
         try:
             with open(req_file, 'r', encoding='utf-8') as f:
                 lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-            # استخراج أسماء الحزم
             packages = []
             for line in lines:
                 pkg_name = re.split(r'[=<>!]', line)[0].strip()
@@ -1175,7 +1184,6 @@ def install_requirements_in_container(container_manager, user_id, file_path) -> 
 def install_imported_requirements(container_manager, user_id, file_path) -> bool:
     """
     تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
-    تستخدم get_imports لاستخراج المكتبات وتثبيتها مع محاولات متعددة.
     """
     if not container_manager.is_available():
         return False
@@ -1196,15 +1204,15 @@ def install_imported_requirements(container_manager, user_id, file_path) -> bool
 
     logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
 
-    # تأكد من وجود دليل .local
     container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
 
     failed = []
     for pkg in external_packages:
         install_name = PACKAGE_ALIASES.get(pkg, pkg)
-        # تحقق مما إذا كانت مثبتة بالفعل (مع مراعاة PYTHONUSERBASE)
-        check_cmd = f"PYTHONUSERBASE=/app/.local python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
-        check_output = container_manager.run_command_in_container(user_id, check_cmd, detach=False)
+        # تحقق مما إذا كانت مثبتة بالفعل
+        env = {'PYTHONUSERBASE': '/app/.local', 'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'}
+        check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+        check_output = container_manager.run_command_in_container(user_id, check_cmd, detach=False, environment=env)
         if check_output and "installed" in check_output:
             logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
             continue
@@ -1329,7 +1337,7 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,                   # نظام الملفات الجذر للقراءة فقط
+                read_only=True,
                 tmpfs={
                     "/tmp": "rw,noexec,nosuid,size=64M"
                 },
@@ -1373,17 +1381,27 @@ class ContainerManager:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True,
+                                 workdir: str = "/app", environment: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """
+        تنفيذ أمر في الحاوية مع إمكانية تحديد متغيرات البيئة.
+        """
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
+            # تحويل environment إلى قائمة من السلاسل بالصيغة KEY=value
+            env_list = None
+            if environment:
+                env_list = [f"{k}={v}" for k, v in environment.items()]
+
             if detach:
                 exec_id = self.docker_client.api.exec_create(
                     container=container.id,
                     cmd=command,
                     workdir=workdir,
+                    environment=env_list,
                 )['Id']
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
@@ -1392,7 +1410,8 @@ class ContainerManager:
                     cmd=command,
                     workdir=workdir,
                     detach=False,
-                    stream=False
+                    stream=False,
+                    environment=env_list,
                 )
                 output = result.output.decode('utf-8').strip()
                 return output
@@ -1401,17 +1420,11 @@ class ContainerManager:
             return None
 
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
-        """
         if not self.is_available():
             return False
         return install_imported_requirements(self, user_id, file_path)
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
-        """
-        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية.
-        """
         if not self.is_available():
             return False
         return install_requirements_in_container(self, user_id, file_path)
@@ -1419,7 +1432,6 @@ class ContainerManager:
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
         تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
-        مع ضبط PYTHONPATH ليشمل مكتبات المستخدم المثبتة في /app/.local
         """
         if not self.is_available():
             return None, None
@@ -1427,29 +1439,35 @@ class ContainerManager:
         try:
             container = self.docker_client.containers.get(container_name)
 
-            # إعداد متغيرات البيئة لتشغيل البوت: PYTHONPATH و PYTHONUSERBASE
-            # نكتشف إصدار بايثون ديناميكياً لإضافة المسار الصحيح
+            # اكتشاف إصدار بايثون
             version = get_python_version_in_container(self, user_id)
             python_path = f"/app/.local/lib/python{version}/site-packages"
-            env_vars = f"PYTHONUSERBASE=/app/.local PYTHONPATH={python_path}:$PYTHONPATH"
+
+            # إعداد متغيرات البيئة
+            env = {
+                'PYTHONUSERBASE': '/app/.local',
+                'PYTHONPATH': python_path,
+                'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'
+            }
+            env_list = [f"{k}={v}" for k, v in env.items()]
 
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            full_cmd = f"{env_vars} {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
-            result = container.exec_run(
+            # تنفيذ الأمر مع البيئة
+            exec_id = self.docker_client.api.exec_create(
+                container=container.id,
                 cmd=shell_cmd,
                 workdir=workdir,
-                detach=False,
-                stream=False
-            )
-            if result.exit_code != 0:
-                logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
-                return None, None
+                environment=env_list,
+            )['Id']
+            self.docker_client.api.exec_start(exec_id, detach=True)
 
             time.sleep(2)
 
+            # قراءة PID
             pid_result = container.exec_run(
                 cmd=["cat", pid_file],
                 workdir=workdir,
@@ -1466,6 +1484,7 @@ class ContainerManager:
                 return None, None
             pid = int(pid_str)
 
+            # قراءة بداية السجل
             log_result = container.exec_run(
                 cmd=["head", "-c", "500", log_file],
                 workdir=workdir,
@@ -1503,7 +1522,6 @@ class ContainerManager:
         return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
 
     def cleanup_stopped_containers(self):
-        """تنظيف الحاويات المتوقفة وإزالتها."""
         if not self.is_available():
             return
         try:
@@ -1518,7 +1536,6 @@ class ContainerManager:
             logger.error(f"خطأ في تنظيف الحاويات المتوقفة: {e}")
 
     def cleanup_unused_images(self):
-        """تنظيف الصور غير المستخدمة."""
         if not self.is_available():
             return
         try:
@@ -1529,7 +1546,7 @@ class ContainerManager:
 
 container_manager = ContainerManager()
 
-# ===================== دوال استضافة الملفات (معدلة للعمل بالحاويات) =====================
+# ===================== دوال استضافة الملفات =====================
 
 def start_hosted_bot(fid):
     f = db["files"].get(fid)
@@ -1584,10 +1601,10 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # ===== تثبيت المتطلبات: محاولة requirements.txt أولاً، ثم المكتبات المستوردة =====
+    # تثبيت المتطلبات
     req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
     if not req_installed:
-        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
+        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt، سنحاول تثبيت المكتبات المستوردة.")
 
     imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
 
@@ -1785,10 +1802,9 @@ def monitor_storage_loop():
             logger.error(f"خطأ في حلقة مراقبة المساحة: {e}")
 
 def cleanup_loop():
-    """حلقة تنظيف دورية للحاويات المتوقفة والملفات المؤقتة."""
     while True:
         try:
-            time.sleep(3600)  # كل ساعة
+            time.sleep(3600)
             container_manager.cleanup_stopped_containers()
             container_manager.cleanup_unused_images()
             clean_temp_decrypted_files()
@@ -2143,7 +2159,6 @@ def handle_daily_gift(chat_id, user_id):
     save_db()
     send_q(chat_id, f"🎁 مبروك! تربحت {gift} نقطة. رصيدك الحالي ولى {u['points']} نقطة.")
 
-# ===== معالجة خطط VIP =====
 def show_vip_plans(chat_id):
     vips = db["settings"].get("vip_plans", [])
     if not vips:
@@ -3403,11 +3418,19 @@ def cmd_stats(message):
 
 # ===================== التشغيل =====================
 if __name__ == "__main__":
+    # تنظيف الملفات غير الموجودة من قاعدة البيانات أولاً
+    cleanup_missing_files_from_db()
     clean_temp_decrypted_files()
     clean_orphaned_files()
     for fid, f in db["files"].items():
         if f.get("status") == "running":
-            start_hosted_bot(fid)
+            # التحقق من وجود الملف قبل المحاولة
+            if os.path.exists(f.get("path", "")):
+                start_hosted_bot(fid)
+            else:
+                logger.warning(f"الملف {f.get('path')} غير موجود، تم تعيين الحالة إلى stopped")
+                f["status"] = "stopped"
+                save_db()
     threading.Thread(target=billing_loop, daemon=True).start()
     threading.Thread(target=auto_backup, daemon=True).start()
     threading.Thread(target=monitor_storage_loop, daemon=True).start()
