@@ -14,21 +14,28 @@ import ast
 import importlib.util
 import sys
 import shlex
+import shutil
+import hashlib
+import base64
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List, Set
+from logging.handlers import RotatingFileHandler
 
 import telebot
 from telebot import types
 from telebot.apihelper import ApiTelegramException
 
-# ===================== إعدادات التسجيل (Logging) =====================
+# ===================== إعدادات التسجيل (Logging) مع التدوير =====================
 LOG_FILE = os.path.join("logs", "bot.log")
 os.makedirs("logs", exist_ok=True)
+
+# إعداد معالج تدوير السجلات (10 ميجابايت لكل ملف، احتفاظ بـ 5 نسخ)
+handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        handler,
         logging.StreamHandler()
     ]
 )
@@ -94,10 +101,6 @@ try:
 except ImportError:
     CRYPTO_AVAILABLE = False
     logger.warning("مكتبة cryptography غير مثبتة، نظام الحماية لن يعمل. يرجى تثبيتها: pip install cryptography")
-
-import hashlib
-import shutil
-import base64
 
 SECURITY_KEY_FILE = "security.key"
 INTEGRITY_FILE = "integrity.json"
@@ -174,11 +177,7 @@ def encrypt_file(filepath: str) -> bool:
         logger.error(f"فشل تشفير الملف {filepath}: {e}")
         return False
 
-def decrypt_file_to_temp(filepath: str, base_dir: str = None) -> str:
-    """
-    فك تشفير الملف إلى مجلد مؤقت. إذا لم يتم تحديد base_dir، يستخدم المجلد العام.
-    يتحقق من أن المسار الناتج يقع ضمن base_dir.
-    """
+def decrypt_file_to_temp(filepath: str) -> str:
     if not CRYPTO_AVAILABLE or not os.path.exists(filepath):
         return filepath
     if not filepath.endswith(".enc"):
@@ -187,12 +186,9 @@ def decrypt_file_to_temp(filepath: str, base_dir: str = None) -> str:
         with open(filepath, "rb") as f:
             encrypted_data = f.read()
         decrypted_data = decrypt_data(encrypted_data)
-        if base_dir is None:
-            base_dir = DECRYPTED_TEMP_DIR
-        os.makedirs(base_dir, exist_ok=True)
-        original_name = os.path.basename(filepath.replace(".enc", ""))
-        # استخدام safe_join لضمان عدم الخروج من base_dir
-        temp_path = safe_join(base_dir, original_name)
+        os.makedirs(DECRYPTED_TEMP_DIR, exist_ok=True)
+        original_name = os.path.basename(filepath).replace(".enc", "")
+        temp_path = os.path.join(DECRYPTED_TEMP_DIR, original_name)
         with open(temp_path, "wb") as f:
             f.write(decrypted_data)
         logger.info(f"تم فك تشفير الملف إلى: {temp_path}")
@@ -302,31 +298,7 @@ def start_security_system():
 def clean_temp_decrypted_files():
     if os.path.exists(DECRYPTED_TEMP_DIR):
         shutil.rmtree(DECRYPTED_TEMP_DIR, ignore_errors=True)
-        logger.info("تم تنظيف المجلد المؤقت العام.")
-
-# ===================== دوال السلامة للمسارات =====================
-def safe_join(base: str, *paths: str) -> str:
-    """
-    تربط المسارات وتتحقق من أن المسار الناتج يقع ضمن base.
-    ترفع ValueError إذا كان هناك محاولة للخروج من base.
-    """
-    real_base = os.path.realpath(base)
-    joined = os.path.join(real_base, *paths)
-    real_joined = os.path.realpath(joined)
-    if not real_joined.startswith(real_base + os.sep):
-        raise ValueError(f"Path traversal attempt: '{joined}' is outside '{base}'")
-    return real_joined
-
-def is_path_inside(base: str, path: str) -> bool:
-    """
-    ترجع True إذا كان المسار path يقع ضمن base، وإلا False.
-    """
-    try:
-        real_base = os.path.realpath(base)
-        real_path = os.path.realpath(path)
-        return real_path.startswith(real_base + os.sep)
-    except Exception:
-        return False
+        logger.info("تم تنظيف المجلد المؤقت.")
 
 # ===================== قاعدة البيانات =====================
 db_lock = threading.Lock()
@@ -338,7 +310,6 @@ STATUS_AR = {
     "running": "▶️ شغال",
     "stopped": "⏹️ متوقف"
 }
-
 
 def load_db() -> Dict[str, Any]:
     if os.path.exists(DB_FILE):
@@ -372,11 +343,11 @@ def load_db() -> Dict[str, Any]:
             "support_account": "@mouhamed_ma",
             "trust_channel": None,
             "pinned_announcement": None,
-            "vip_plans": []
+            "vip_plans": [],
+            "max_backups": 200
         },
         "admins": [ADMIN_ID]
     }
-
 
 def save_db():
     with db_lock:
@@ -384,7 +355,6 @@ def save_db():
         encrypted = encrypt_data(json_str.encode('utf-8'))
         with open(DB_FILE, "wb") as f:
             f.write(encrypted)
-
 
 db = load_db()
 
@@ -409,7 +379,8 @@ def migrate_db():
         "support_account": "@mouhamed_ma",
         "trust_channel": None,
         "pinned_announcement": None,
-        "vip_plans": []
+        "vip_plans": [],
+        "max_backups": 200
     }
     for key, value in defaults.items():
         if key not in settings:
@@ -421,12 +392,13 @@ def migrate_db():
 
 migrate_db()
 
+# تحديث بعض القيم الافتراضية
 db["settings"]["free_points"] = 100
 db["settings"]["referral_bonus"] = 15
 db["settings"]["daily_cost"] = 10
 db["settings"]["daily_gift"] = 10
 save_db()
-logger.info("تم تحديث الإعدادات: free_points=100, referral_bonus=15, daily_cost=10, daily_gift=5")
+logger.info("تم تحديث الإعدادات: free_points=100, referral_bonus=15, daily_cost=10, daily_gift=10")
 
 pending_action = {}
 running_processes = {}
@@ -434,30 +406,24 @@ cooldown = {}
 question_messages = {}
 bot_enabled = True
 
-
 # ===================== أدوات مساعدة =====================
 def now_iso():
     return datetime.now().isoformat()
 
-
 def short_id():
     return uuid.uuid4().hex[:8]
-
 
 def is_admin(user_id):
     return int(user_id) in db.get("admins", [ADMIN_ID]) or int(user_id) == ADMIN_ID
 
-
 def get_points(user_id):
     return db["users"].get(str(user_id), {}).get("points", 0)
-
 
 def add_points(user_id, amount):
     uid = str(user_id)
     if uid in db["users"]:
         db["users"][uid]["points"] += amount
         save_db()
-
 
 def get_user_name(user_id):
     uid = str(user_id)
@@ -466,24 +432,19 @@ def get_user_name(user_id):
         return user_data.get("username") or f"مستخدم {uid}"
     return f"مستخدم {uid}"
 
-
 def esc(value):
     return html.escape("" if value is None else str(value))
 
-
 def q(text):
     return f"<blockquote>{text}</blockquote>"
-
 
 def send_q(chat_id, text, **kwargs):
     kwargs.setdefault("parse_mode", "HTML")
     return bot.send_message(chat_id, q(text), **kwargs)
 
-
 def reply_q(message, text, **kwargs):
     kwargs.setdefault("parse_mode", "HTML")
     return bot.reply_to(message, q(text), **kwargs)
-
 
 def edit_q(text, chat_id, message_id, **kwargs):
     kwargs.setdefault("parse_mode", "HTML")
@@ -495,7 +456,6 @@ def edit_q(text, chat_id, message_id, **kwargs):
         except Exception:
             raise
 
-
 def get_user_photo_file_id(user_id):
     try:
         photos = bot.get_user_profile_photos(user_id, limit=1)
@@ -504,7 +464,6 @@ def get_user_photo_file_id(user_id):
     except Exception as e:
         logger.warning(f"لم نتمكن من جلب صورة المستخدم {user_id}: {e}")
     return None
-
 
 def send_user_card(chat_id, user_id, caption, reply_markup=None):
     photo_id = get_user_photo_file_id(user_id)
@@ -526,10 +485,8 @@ def send_user_card(chat_id, user_id, caption, reply_markup=None):
         parse_mode="HTML",
     )
 
-
 def send_admin_user_card(chat_id, user_id, caption, reply_markup=None):
     return send_user_card(chat_id, user_id, caption, reply_markup=reply_markup)
-
 
 def update_last_activity(user_id):
     uid = str(user_id)
@@ -537,11 +494,9 @@ def update_last_activity(user_id):
         db["users"][uid]["last_activity"] = now_iso()
         save_db()
 
-
 def is_user_banned(user_id):
     uid = str(user_id)
     return db["users"].get(uid, {}).get("banned", False)
-
 
 def ensure_user(user_id, username=None, ref_by=None):
     uid = str(user_id)
@@ -592,7 +547,6 @@ def ensure_user(user_id, username=None, ref_by=None):
         db["users"][uid]["username"] = username
     return db["users"][uid]
 
-
 def check_force_sub(user_id):
     channels = db["settings"]["channels"]
     if not channels:
@@ -608,9 +562,7 @@ def check_force_sub(user_id):
             not_joined.append(ch)
     return len(not_joined) == 0, not_joined
 
-
 def clean_orphaned_files():
-    """تنظيف الملفات اليتيمة من مجلد uploads بعد نقلها إلى مجلدات المستخدمين."""
     if not os.path.exists(UPLOADS_DIR):
         return
     for filename in os.listdir(UPLOADS_DIR):
@@ -627,7 +579,6 @@ def clean_orphaned_files():
             except Exception as e:
                 logger.error(f"فشل حذف الملف اليتيم {filepath}: {e}")
 
-
 # ===================== دوال قناة الثقة =====================
 def _parse_chat_identifier(raw):
     s = raw.strip()
@@ -642,7 +593,6 @@ def _parse_chat_identifier(raw):
         return int(s)
     except ValueError:
         return s
-
 
 def verify_and_set_trust_channel(channel_input):
     if not channel_input:
@@ -685,7 +635,6 @@ def verify_and_set_trust_channel(channel_input):
         logger.error(f"خطأ غير متوقع في verify_and_set_trust_channel: {e}")
         return False, f"❌ خطأ غير متوقع: {str(e)}"
 
-
 def send_to_trust_channel(text):
     channel_setting = db["settings"].get("trust_channel")
     if not channel_setting:
@@ -719,7 +668,6 @@ def send_to_trust_channel(text):
         except:
             pass
 
-
 def send_to_vip_channel(text):
     if VIP_CHANNEL_ID is None:
         return
@@ -728,7 +676,6 @@ def send_to_vip_channel(text):
         logger.info(f"تم الإرسال إلى قناة VIP: {VIP_CHANNEL_ID}")
     except Exception as e:
         logger.error(f"فشل الإرسال إلى قناة VIP: {e}")
-
 
 def export_orders_to_csv():
     output = io.StringIO()
@@ -748,10 +695,8 @@ def export_orders_to_csv():
         ])
     return output.getvalue().encode('utf-8')
 
-
 # ===================== دالة النسخ الاحتياطي التلقائي =====================
 BACKUP_INTERVAL = 300
-MAX_BACKUPS = 10
 
 def auto_backup():
     while True:
@@ -759,11 +704,12 @@ def auto_backup():
             time.sleep(BACKUP_INTERVAL)
             create_full_backup_and_send_to_channel(BACKUP_CHANNEL)
 
+            max_backups = db["settings"].get("max_backups", 200)
             backups = sorted(
                 [f for f in os.listdir(BACKUP_DIR) if f.startswith("full_backup_") and f.endswith(".zip")],
                 key=lambda f: os.path.getmtime(os.path.join(BACKUP_DIR, f))
             )
-            while len(backups) > MAX_BACKUPS:
+            while len(backups) > max_backups:
                 oldest = backups.pop(0)
                 os.remove(os.path.join(BACKUP_DIR, oldest))
                 logger.info(f"🗑️ تم حذف النسخة القديمة: {oldest}")
@@ -772,20 +718,16 @@ def auto_backup():
             logger.error(f"❌ خطأ في النسخ الاحتياطي التلقائي: {e}")
 
 def backup_uploaded_files():
-    if not os.path.exists(USER_DATA_DIR) or not os.listdir(USER_DATA_DIR):
+    if not os.path.exists(UPLOADS_DIR) or not os.listdir(UPLOADS_DIR):
         return None
     backup_path = os.path.join(BACKUP_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for user_id in os.listdir(USER_DATA_DIR):
-            user_path = os.path.join(USER_DATA_DIR, user_id)
-            if os.path.isdir(user_path):
-                for root, dirs, files in os.walk(user_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, start=os.path.dirname(USER_DATA_DIR))
-                        zipf.write(file_path, arcname)
+        for root, dirs, files in os.walk(UPLOADS_DIR):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, start=os.path.dirname(UPLOADS_DIR))
+                zipf.write(file_path, arcname)
     return backup_path
-
 
 def create_full_backup_and_send_to_channel(channel_input):
     chat_id = _parse_chat_identifier(channel_input)
@@ -798,11 +740,11 @@ def create_full_backup_and_send_to_channel(channel_input):
         with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             if os.path.exists(DB_FILE):
                 zipf.write(DB_FILE, os.path.basename(DB_FILE))
-            if os.path.exists(USER_DATA_DIR):
-                for root, _, files in os.walk(USER_DATA_DIR):
+            if os.path.exists(UPLOADS_DIR):
+                for root, _, files in os.walk(UPLOADS_DIR):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, start=os.path.dirname(USER_DATA_DIR))
+                        arcname = os.path.relpath(file_path, start=os.path.dirname(UPLOADS_DIR))
                         zipf.write(file_path, arcname)
             if os.path.exists(LOGS_DIR):
                 for root, _, files in os.walk(LOGS_DIR):
@@ -848,7 +790,6 @@ def create_full_backup_and_send_to_channel(channel_input):
         except:
             pass
 
-
 # ===================== لوحات المفاتيح =====================
 def main_menu_kb(user_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -880,13 +821,9 @@ def main_menu_kb(user_id):
         types.InlineKeyboardButton("📜 القوانين", callback_data="rules", style="success"),
         types.InlineKeyboardButton("ℹ️ المساعدة", callback_data="help", style="success"),
     )
-    kb.add(
-        types.InlineKeyboardButton("📦 إضافة مكاتب", callback_data="install_libs", style="primary"),
-    )
     if is_admin(user_id):
         kb.add(types.InlineKeyboardButton("🛡️ لوحة الإدارة", callback_data="admin_panel", style="danger"))
     return kb
-
 
 def admin_menu_kb():
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -956,12 +893,12 @@ def admin_menu_kb():
     )
     kb.add(
         types.InlineKeyboardButton("🔄 إدارة الاشتراكات", callback_data="admin_manage_subscriptions", style="danger"),
+        types.InlineKeyboardButton("⚙️ إعدادات النسخ الاحتياطي", callback_data="admin_backup_settings", style="primary"),
         types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main", style="danger"),
     )
     return kb
 
-
-# ===================== دوال تثبيت المكتبات =====================
+# ===================== دوال تثبيت المكتبات (مطورة بشكل كبير) =====================
 BUILTIN_MODULES = {
     'sys', 'os', 're', 'json', 'time', 'datetime', 'typing', 'collections',
     'itertools', 'math', 'random', 'string', 'logging', 'io', 'zipfile', 'csv',
@@ -975,10 +912,11 @@ BUILTIN_MODULES = {
     'fileinput', 'curses', 'dbm', 'sqlite3', 'bz2', 'gzip', 'lzma', 'zlib',
     'tarfile', 'zipfile', 'crypt', 'hmac', 'secrets', 'shlex', 'stringprep',
     'unicodedata', 'codecs', 'locale', 'numbers', 'decimal', 'fractions',
-    'random', 'statistics', 'array', 'mmap', 'resource', 'sysconfig', 'distutils',
+    'statistics', 'array', 'mmap', 'resource', 'sysconfig', 'distutils',
     'ctypes', 'cProfile', 'pstats', 'trace', 'turtle', 'tkinter', 'webbrowser'
 }
 
+# قائمة واسعة من الأسماء البديلة للمكتبات الشائعة
 PACKAGE_ALIASES = {
     "dateutil": "python-dateutil",
     "yaml": "pyyaml",
@@ -986,19 +924,131 @@ PACKAGE_ALIASES = {
     "telegram": "python-telegram-bot",
     "telegram.ext": "python-telegram-bot",
     "telebot": "pyTelegramBotAPI",
+    "pyTelegramBotAPI": "pyTelegramBotAPI",
+    "Telethon": "Telethon",
+    "Pyrogram": "Pyrogram",
+    "TgCrypto": "TgCrypto",
+    "aiogram": "aiogram",
     "requests": "requests",
-    "sqlite3": "sqlite3",
+    "httpx": "httpx",
+    "aiohttp": "aiohttp",
+    "urllib3": "urllib3",
+    "beautifulsoup4": "beautifulsoup4",
+    "bs4": "beautifulsoup4",
+    "lxml": "lxml",
+    "selenium": "selenium",
+    "playwright": "playwright",
+    "opencv-python": "opencv-python",
+    "opencv-python-headless": "opencv-python-headless",
+    "numpy": "numpy",
+    "scipy": "scipy",
+    "pandas": "pandas",
+    "matplotlib": "matplotlib",
+    "Pillow": "Pillow",
+    "psutil": "psutil",
+    "flask": "flask",
+    "fastapi": "fastapi",
+    "quart": "quart",
+    "uvicorn": "uvicorn",
+    "gunicorn": "gunicorn",
+    "sqlalchemy": "sqlalchemy",
+    "aiosqlite": "aiosqlite",
+    "motor": "motor",
+    "pymongo": "pymongo",
+    "redis": "redis",
+    "celery": "celery",
+    "apscheduler": "apscheduler",
+    "cryptography": "cryptography",
+    "pycryptodome": "pycryptodome",
+    "python-dotenv": "python-dotenv",
+    "orjson": "orjson",
+    "ujson": "ujson",
+    "pydantic": "pydantic",
+    "rich": "rich",
+    "colorama": "colorama",
+    "emoji": "emoji",
+    "faker": "faker",
+    "schedule": "schedule",
+    "yt-dlp": "yt-dlp",
+    "moviepy": "moviepy",
+    "ffmpeg-python": "ffmpeg-python",
+    "youtube-search-python": "youtube-search-python",
+    "youtube_dl": "youtube_dl",
+    "pyyaml": "pyyaml",
+    "python-dateutil": "python-dateutil",
+    "dateparser": "dateparser",
+    "humanize": "humanize",
+    "Babel": "Babel",
+    "openai": "openai",
+    "google-generativeai": "google-generativeai",
+    "cohere": "cohere",
+    "anthropic": "anthropic",
+    "huggingface_hub": "huggingface_hub",
+    "transformers": "transformers",
+    "torch": "torch",
+    "tensorflow": "tensorflow",
+    "onnxruntime": "onnxruntime",
+    "scikit-learn": "scikit-learn",
+    "faiss": "faiss",
+    "sentence-transformers": "sentence-transformers",
+    "discord.py": "discord.py",
+    "slack_sdk": "slack_sdk",
+    "websocket-client": "websocket-client",
+    "websockets": "websockets",
+    "gTTS": "gTTS",
+    "SpeechRecognition": "SpeechRecognition",
+    "pydub": "pydub",
+    "soundfile": "soundfile",
+    "mutagen": "mutagen",
+    "instaloader": "instaloader",
+    "TikTokApi": "TikTokApi",
+    "cloudscraper": "cloudscraper",
+    "undetected-chromedriver": "undetected-chromedriver",
+    "pyppeteer": "pyppeteer",
+    "docker": "docker",
+    "docker-compose": "docker-compose",
+    "GitPython": "GitPython",
+    "paramiko": "paramiko",
+    "bcrypt": "bcrypt",
+    "passlib": "passlib",
+    "pyjwt": "pyjwt",
+    "jwt": "pyjwt",
+    "xmltodict": "xmltodict",
+    "feedparser": "feedparser",
+    "rapidfuzz": "rapidfuzz",
+    "fuzzywuzzy": "fuzzywuzzy",
+    "Levenshtein": "Levenshtein",
+    "asyncpg": "asyncpg",
+    "mysqlclient": "mysqlclient",
+    "pymysql": "pymysql",
+    "psycopg2": "psycopg2",
+    "sqlite-utils": "sqlite-utils",
 }
 
 def get_imports(file_path):
+    """استخراج أسماء المكتبات المستوردة من ملف بايثون باستخدام AST وتحليل شامل."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            tree = ast.parse(f.read())
-    except SyntaxError as e:
-        logger.error(f"خطأ في تحليل الملف {file_path}: {e}")
+            content = f.read()
+    except Exception as e:
+        logger.error(f"خطأ في قراءة الملف {file_path} لاستخراج imports: {e}")
         return set()
 
     imports = set()
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as e:
+        logger.error(f"خطأ في تحليل الملف {file_path}: {e}")
+        # محاولة استخراج عبر التعبيرات النمطية كحل بديل
+        pattern = r'^\s*(?:from\s+([a-zA-Z0-9_.]+)\s+import|import\s+([a-zA-Z0-9_.]+))'
+        for line in content.splitlines():
+            match = re.match(pattern, line)
+            if match:
+                module = match.group(1) or match.group(2)
+                if module:
+                    imports.add(module.split('.')[0])
+        return imports
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1008,87 +1058,158 @@ def get_imports(file_path):
             if node.module:
                 module_name = node.module.split('.')[0]
                 imports.add(module_name)
+        # استيراد ديناميكي (__import__)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == '__import__':
+                if node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        imports.add(arg.value.split('.')[0])
+        # importlib.import_module
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if (isinstance(node.func.value, ast.Name) and node.func.value.id == 'importlib'
+                        and node.func.attr == 'import_module'):
+                    if node.args:
+                        arg = node.args[0]
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            imports.add(arg.value.split('.')[0])
+
     return imports
 
-def install_missing_requirements(file_path):
-    start_time = time.time()
-    logger.info(f"بدء التحقق من متطلبات البوت: {file_path}")
+def get_python_version_in_container(container_manager, user_id):
+    """الحصول على إصدار بايثون داخل الحاوية (مثلاً 3.11)"""
+    try:
+        output = container_manager.run_command_in_container(user_id, "python3 -c 'import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")'", detach=False)
+        if output:
+            version = output.strip()
+            if re.match(r'^\d+\.\d+$', version):
+                return version
+    except Exception as e:
+        logger.error(f"فشل الحصول على إصدار بايثون للمستخدم {user_id}: {e}")
+    return "3.11"  # افتراضي
 
-    base_dir = os.path.dirname(file_path)
-    requirements_file = os.path.join(base_dir, "requirements.txt")
+def install_package_with_retries(container_manager, user_id, package_name, install_name=None, retries=3):
+    """محاولة تثبيت حزمة مع عدة محاولات وأسماء بديلة."""
+    if install_name is None:
+        install_name = package_name
 
-    if os.path.exists(requirements_file):
-        logger.info(f"تم العثور على {requirements_file}، سيتم تثبيت المكتبات منه.")
+    for attempt in range(1, retries + 1):
         try:
-            with open(requirements_file, 'r', encoding='utf-8') as f:
-                raw_packages = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            # حاول التثبيت مع --no-cache-dir و --upgrade إذا كان المحاولة الأخيرة
+            upgrade_flag = " --upgrade" if attempt == retries else ""
+            cmd = f"pip install {install_name}{upgrade_flag} --no-cache-dir"
+            logger.info(f"محاولة {attempt}/{retries} تثبيت {install_name} (المطلوب: {package_name})")
+            output = container_manager.run_command_in_container(user_id, cmd, detach=False)
+            if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
+                logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
+                return True
+            else:
+                logger.warning(f"فشل تثبيت {install_name} في المحاولة {attempt}: {output}")
+                # جرب اسم بديل إذا كان موجوداً
+                if attempt == 1 and install_name != package_name:
+                    # جرب اسم الحزمة الأصلي إذا كنا نستخدم اسم بديل
+                    alt_name = package_name
+                    if alt_name != install_name:
+                        logger.info(f"محاولة التثبيت بالاسم الأصلي: {alt_name}")
+                        cmd2 = f"pip install {alt_name} --no-cache-dir"
+                        output2 = container_manager.run_command_in_container(user_id, cmd2, detach=False)
+                        if output2 and ("Successfully installed" in output2 or "Requirement already satisfied" in output2):
+                            logger.info(f"✅ تم تثبيت {alt_name} بنجاح.")
+                            return True
+        except Exception as e:
+            logger.error(f"خطأ أثناء تثبيت {install_name}: {e}")
+        time.sleep(2)  # انتظار قبل المحاولة التالية
+    return False
+
+def install_requirements_in_container(container_manager, user_id, file_path) -> bool:
+    """تثبيت المتطلبات من ملف requirements.txt داخل الحاوية مع محاولات متعددة."""
+    if not container_manager.is_available():
+        return False
+    base_dir = os.path.dirname(file_path)
+    req_file = os.path.join(base_dir, "requirements.txt")
+    if not os.path.exists(req_file):
+        return True  # لا يوجد ملف، نعتبر ناجحاً
+
+    container_path = f"/app/files/requirements.txt"
+    if not container_manager.copy_file_to_container(user_id, req_file, container_path):
+        logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
+        return False
+
+    # محاولة تثبيت باستخدام الملف كاملاً
+    cmd = f"pip install -r /app/files/requirements.txt --no-cache-dir"
+    output = container_manager.run_command_in_container(user_id, cmd, detach=False)
+    if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
+        logger.info(f"تم تثبيت المتطلبات من requirements.txt للمستخدم {user_id}")
+        return True
+    else:
+        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت كل مكتبة على حدة.")
+        # فشل التثبيت الكامل، نحاول تثبيت كل مكتبة بشكل فردي
+        try:
+            with open(req_file, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            # استخراج أسماء الحزم
             packages = []
-            for pkg in raw_packages:
-                pkg_name = re.split(r'[=<>!]', pkg)[0].strip()
+            for line in lines:
+                # استخراج اسم الحزمة (أول جزء قبل أي علامة = أو > أو <)
+                pkg_name = re.split(r'[=<>!]', line)[0].strip()
                 if pkg_name:
                     packages.append(pkg_name)
-            logger.info(f"تم استخراج {len(packages)} مكتبة من requirements.txt: {packages}")
+            success_all = True
+            for pkg in packages:
+                install_name = PACKAGE_ALIASES.get(pkg, pkg)
+                if not install_package_with_retries(container_manager, user_id, pkg, install_name):
+                    logger.error(f"فشل تثبيت المكتبة {pkg} حتى بعد المحاولات.")
+                    success_all = False
+            return success_all
         except Exception as e:
-            logger.error(f"فشل قراءة {requirements_file}: {e}")
-            packages = []
-    else:
-        logger.info(f"لا يوجد requirements.txt، سيتم استخراج المكتبات من الملف نفسه.")
-        packages = get_imports(file_path)
-        logger.info(f"تم استخراج {len(packages)} مكتبة مستوردة: {packages}")
+            logger.error(f"خطأ في معالجة requirements.txt: {e}")
+            return False
 
-    if not packages:
-        logger.info("لا توجد مكتبات خارجية مطلوبة، سيتم تشغيل البوت مباشرة.")
-        return
+def install_imported_requirements(container_manager, user_id, file_path) -> bool:
+    """
+    تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
+    تستخدم get_imports لاستخراج المكتبات وتثبيتها مع محاولات متعددة.
+    """
+    if not container_manager.is_available():
+        return False
 
-    unique_packages = set(p for p in packages if p not in BUILTIN_MODULES)
-    if not unique_packages:
-        logger.info("جميع المكتبات المطلوبة هي مكتبات مدمجة، لا حاجة للتثبيت.")
-        return
+    imports = get_imports(file_path)
+    if not imports:
+        logger.info("لا توجد مكتبات مستوردة من الملف.")
+        return True
 
-    logger.info(f"سيتم تثبيت {len(unique_packages)} مكتبة: {unique_packages}")
+    external_packages = []
+    for pkg in imports:
+        if pkg not in BUILTIN_MODULES:
+            external_packages.append(pkg)
+
+    if not external_packages:
+        logger.info("جميع المكتبات المستوردة هي مكتبات مدمجة، لا حاجة للتثبيت.")
+        return True
+
+    logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
 
     failed = []
-    for package in unique_packages:
-        import_name = package
-        install_name = PACKAGE_ALIASES.get(package, package)
+    for pkg in external_packages:
+        install_name = PACKAGE_ALIASES.get(pkg, pkg)
+        # تحقق مما إذا كانت مثبتة بالفعل
+        check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+        check_output = container_manager.run_command_in_container(user_id, check_cmd, detach=False)
+        if check_output and "installed" in check_output:
+            logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
+            continue
 
-        try:
-            if importlib.util.find_spec(import_name) is not None:
-                logger.info(f"المكتبة {import_name} مثبتة بالفعل، تخطي.")
-                continue
-        except (ImportError, ModuleNotFoundError):
-            pass
-
-        logger.info(f"جاري تثبيت المكتبة: {install_name}")
-        try:
-            cmd = [sys.executable, '-m', 'pip', 'install', install_name]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                check=False
-            )
-            if result.returncode == 0:
-                logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
-            else:
-                error_msg = result.stderr.strip() or result.stdout.strip()
-                logger.error(f"❌ فشل تثبيت {install_name}: {error_msg}")
-                failed.append((install_name, error_msg))
-        except subprocess.TimeoutExpired:
-            logger.error(f"❌ انتهت مهلة تثبيت {install_name} (أكثر من 5 دقائق).")
-            failed.append((install_name, "انتهت المهلة"))
-        except Exception as e:
-            logger.error(f"❌ خطأ غير متوقع أثناء تثبيت {install_name}: {e}")
-            failed.append((install_name, str(e)))
+        if install_package_with_retries(container_manager, user_id, pkg, install_name):
+            logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
+        else:
+            logger.error(f"❌ فشل تثبيت {install_name} بعد كل المحاولات.")
+            failed.append(install_name)
 
     if failed:
-        error_details = "\n".join([f"- {p}: {e}" for p, e in failed])
-        raise RuntimeError(f"فشل تثبيت بعض المكتبات:\n{error_details}")
-
-    elapsed = time.time() - start_time
-    logger.info(f"✅ تم تثبيت جميع المكتبات بنجاح في {elapsed:.2f} ثانية.")
-
+        logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
+        return False
+    return True
 
 # ===================== نظام الحاويات (Container Isolation) =====================
 try:
@@ -1102,7 +1223,6 @@ except ImportError:
 CONTAINER_IMAGE = "python:3.11-slim"
 MAX_STORAGE_MB = 500
 os.makedirs(USER_DATA_DIR, exist_ok=True)
-
 
 class ContainerManager:
     """مدير الحاويات لكل مستخدم - يوفر العزل الكامل للملفات والعمليات والمخرجات"""
@@ -1124,20 +1244,16 @@ class ContainerManager:
         return self.docker_client is not None
 
     def get_user_dir(self, user_id: str) -> str:
-        """المسار المطلق لمجلد المستخدم على المضيف."""
         return os.path.abspath(os.path.join(USER_DATA_DIR, str(user_id)))
 
     def get_user_container_name(self, user_id: str) -> str:
         return f"user_{user_id}"
 
     def ensure_user_dir(self, user_id: str):
-        """إنشاء مجلد المستخدم مع الأقسام الفرعية الضرورية."""
         user_dir = self.get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
-        for sub in ["files", "logs", ".local"]:
+        for sub in ["files", "logs"]:
             os.makedirs(os.path.join(user_dir, sub), exist_ok=True)
-        site_packages = os.path.join(user_dir, ".local", "lib", "python3.11", "site-packages")
-        os.makedirs(site_packages, exist_ok=True)
 
     def get_user_storage_usage(self, user_id: str) -> int:
         user_dir = self.get_user_dir(user_id)
@@ -1204,18 +1320,18 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,
+                read_only=True,                   # نظام الملفات الجذر للقراءة فقط
                 tmpfs={
-                    "/tmp": "rw,noexec,nosuid,size=256M",
-                    "/root/.cache": "rw,noexec,nosuid,size=128M"
+                    "/tmp": "rw,noexec,nosuid,size=64M"
                 },
                 detach=True,
                 tty=True,
                 mem_limit="512m",
-                memswap_limit="100g",
+                memswap_limit="1g",
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],
                 cap_add=["SETUID", "SETGID"],
+                restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}
             )
             container.start()
             logger.info(f"✅ تم إنشاء حاوية للمستخدم {user_id}: {container_name}")
@@ -1227,14 +1343,6 @@ class ContainerManager:
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
         if not self.is_available():
             return False
-        if not container_path.startswith("/app/"):
-            logger.error(f"مسار غير مسموح به: {container_path}")
-            return False
-        user_dir = self.get_user_dir(user_id)
-        if not is_path_inside(user_dir, local_path):
-            logger.error(f"محاولة نسخ ملف خارج نطاق المستخدم: {local_path}")
-            return False
-
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
@@ -1256,7 +1364,7 @@ class ContainerManager:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app", env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True, workdir: str = "/app") -> Optional[str]:
         if not self.is_available():
             return None
         container_name = self.get_user_container_name(user_id)
@@ -1267,7 +1375,6 @@ class ContainerManager:
                     container=container.id,
                     cmd=command,
                     workdir=workdir,
-                    environment=env or {}
                 )['Id']
                 self.docker_client.api.exec_start(exec_id, detach=True)
                 return exec_id
@@ -1276,8 +1383,7 @@ class ContainerManager:
                     cmd=command,
                     workdir=workdir,
                     detach=False,
-                    stream=False,
-                    environment=env or {}
+                    stream=False
                 )
                 output = result.output.decode('utf-8').strip()
                 return output
@@ -1285,161 +1391,42 @@ class ContainerManager:
             logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
-    def install_libraries_from_file(self, user_id: str, file_content: str) -> bool:
-        if not self.is_available():
-            return False
-
-        # إنشاء الدليل /app/files إذا لم يكن موجوداً
-        self.run_command_in_container(user_id, "mkdir -p /app/files", detach=False)
-
-        # كتابة المحتوى إلى ملف داخل الحاوية باستخدام echo
-        lines = [line.strip() for line in file_content.splitlines() if line.strip() and not line.startswith('#')]
-        if not lines:
-            return True
-
-        # استخدام printf لكتابة كل سطر بشكل آمن
-        libs_file = "/app/files/user_libs.txt"
-        # حذف الملف القديم إن وجد
-        self.run_command_in_container(user_id, f"rm -f {libs_file}", detach=False)
-        for lib in lines:
-            safe_lib = lib.replace("'", "'\\''")
-            cmd = f"printf '%s\\n' '{safe_lib}' >> {libs_file}"
-            self.run_command_in_container(user_id, cmd, detach=False)
-
-        target_dir = "/app/.local/lib/python3.11/site-packages"
-        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
-
-        # تعيين متغير البيئة PIP_CACHE_DIR إلى /tmp/pip-cache (قابل للكتابة)
-        env = {
-            "PYTHONPATH": target_dir,
-            "PIP_CACHE_DIR": "/tmp/pip-cache"
-        }
-        install_cmd = f"pip install --no-cache-dir --target {target_dir} -r {libs_file}"
-        output = self.run_command_in_container(user_id, install_cmd, detach=False, env=env)
-        if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
-            logger.info(f"✅ تم تثبيت المكتبات بنجاح للمستخدم {user_id}")
-            return True
-        else:
-            logger.error(f"❌ فشل تثبيت المكتبات للمستخدم {user_id}: {output}")
-            return False
-
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
+        """
+        تثبيت جميع المكتبات المستوردة من الملف داخل الحاوية.
+        """
         if not self.is_available():
             return False
-
-        user_dir = self.get_user_dir(user_id)
-        if not is_path_inside(user_dir, file_path):
-            logger.error(f"محاولة تثبيت متطلبات من ملف خارج النطاق: {file_path}")
-            return False
-
-        imports = get_imports(file_path)
-        if not imports:
-            logger.info("لا توجد مكتبات مستوردة من الملف.")
-            return True
-
-        external_packages = []
-        for pkg in imports:
-            if pkg not in BUILTIN_MODULES:
-                external_packages.append(pkg)
-
-        if not external_packages:
-            logger.info("جميع المكتبات المستوردة هي مكتبات مدمجة، لا حاجة للتثبيت.")
-            return True
-
-        logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
-
-        target_dir = "/app/.local/lib/python3.11/site-packages"
-        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
-
-        # تعيين متغير البيئة PIP_CACHE_DIR
-        env = {
-            "PYTHONPATH": target_dir,
-            "PIP_CACHE_DIR": "/tmp/pip-cache"
-        }
-
-        failed = []
-        for pkg in external_packages:
-            install_name = PACKAGE_ALIASES.get(pkg, pkg)
-            # التحقق المسبق
-            check_cmd = f"test -d {target_dir}/{pkg.replace('-', '_')} && echo installed || echo not_installed"
-            check_output = self.run_command_in_container(user_id, check_cmd, detach=False)
-            if check_output and "installed" in check_output:
-                logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
-                continue
-
-            logger.info(f"جاري تثبيت المكتبة: {install_name} (المستوردة باسم: {pkg})")
-            cmd = f"pip install --no-cache-dir --target {target_dir} {install_name}"
-            output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
-            if output is not None and ("Successfully installed" in output or "Requirement already satisfied" in output):
-                logger.info(f"✅ تم تثبيت {install_name} بنجاح.")
-            else:
-                logger.error(f"❌ فشل تثبيت {install_name}: {output}")
-                failed.append(install_name)
-
-        if failed:
-            logger.error(f"فشل تثبيت بعض المكتبات: {failed}")
-            return False
-        return True
+        return install_imported_requirements(self, user_id, file_path)
 
     def install_requirements_in_container(self, user_id: str, file_path: str) -> bool:
+        """
+        تثبيت المتطلبات من ملف requirements.txt داخل الحاوية.
+        """
         if not self.is_available():
             return False
-        base_dir = os.path.dirname(file_path)
-        req_file = os.path.join(base_dir, "requirements.txt")
-        if not os.path.exists(req_file):
-            return True
-
-        user_dir = self.get_user_dir(user_id)
-        if not is_path_inside(user_dir, req_file):
-            logger.error(f"ملف requirements.txt خارج النطاق: {req_file}")
-            return False
-
-        container_path = f"/app/files/requirements.txt"
-        if not self.copy_file_to_container(user_id, req_file, container_path):
-            logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
-            return False
-
-        target_dir = "/app/.local/lib/python3.11/site-packages"
-        self.run_command_in_container(user_id, f"mkdir -p {target_dir}", detach=False)
-
-        env = {
-            "PYTHONPATH": target_dir,
-            "PIP_CACHE_DIR": "/tmp/pip-cache"
-        }
-        cmd = f"pip install --no-cache-dir --target {target_dir} -r /app/files/requirements.txt"
-        output = self.run_command_in_container(user_id, cmd, detach=False, env=env)
-        if output is not None:
-            logger.info(f"تم تثبيت المتطلبات للمستخدم {user_id}: {output[:200]}")
-            return True
-        else:
-            logger.error(f"فشل تثبيت المتطلبات للمستخدم {user_id}")
-            return False
+        return install_requirements_in_container(self, user_id, file_path)
 
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
+        """
+        تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
+        """
         if not self.is_available():
             return None, None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
 
-            target_dir = "/app/.local/lib/python3.11/site-packages"
-            env = {
-                "PYTHONPATH": target_dir,
-                "PYTHONUSERBASE": "/app/.local",
-                "PATH": "/app/.local/bin:/usr/local/bin:/usr/bin:/bin"
-            }
-
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            full_cmd = f"export PYTHONPATH={target_dir}; export PYTHONUSERBASE=/app/.local; {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
             result = container.exec_run(
                 cmd=shell_cmd,
                 workdir=workdir,
                 detach=False,
-                stream=False,
-                environment=env
+                stream=False
             )
             if result.exit_code != 0:
                 logger.error(f"فشل بدء العملية: {result.output.decode('utf-8')}")
@@ -1497,34 +1484,38 @@ class ContainerManager:
         return result is not None
 
     def get_log_path(self, user_id: str, file_id: str) -> str:
-        """تعيد مسار سجل البوت مع تحقق أمني."""
-        user_dir = self.get_user_dir(user_id)
-        safe_fid = os.path.basename(file_id)
-        return safe_join(user_dir, "logs", f"{safe_fid}.log")
+        return os.path.join(self.get_user_dir(user_id), "logs", f"{file_id}.log")
 
-    def cleanup_user_container(self, user_id: str):
-        """حذف حاوية المستخدم ومجلده بالكامل."""
+    def cleanup_stopped_containers(self):
+        """تنظيف الحاويات المتوقفة وإزالتها."""
+        if not self.is_available():
+            return
         try:
-            container_name = self.get_user_container_name(user_id)
-            if self.is_available():
-                try:
-                    container = self.docker_client.containers.get(container_name)
-                    container.stop(timeout=5)
-                    container.remove(force=True)
-                    logger.info(f"تم حذف حاوية المستخدم {user_id}")
-                except NotFound:
-                    pass
-            user_dir = self.get_user_dir(user_id)
-            if os.path.exists(user_dir):
-                shutil.rmtree(user_dir, ignore_errors=True)
-                logger.info(f"تم حذف مجلد المستخدم {user_id}")
+            containers = self.docker_client.containers.list(all=True, filters={"status": "exited"})
+            for container in containers:
+                # تجنب حذف الحاويات التي ما زالت مستخدمة
+                if container.name.startswith("user_"):
+                    # نتحقق إذا كانت الحاوية لا تزال في قاعدة البيانات
+                    user_id = container.name.split("_")[1]
+                    if not any(f["owner"] == user_id for f in db["files"].values()):
+                        container.remove()
+                        logger.info(f"تم حذف الحاوية المتوقفة {container.name}")
         except Exception as e:
-            logger.error(f"خطأ في تنظيف المستخدم {user_id}: {e}")
+            logger.error(f"خطأ في تنظيف الحاويات المتوقفة: {e}")
 
+    def cleanup_unused_images(self):
+        """تنظيف الصور غير المستخدمة."""
+        if not self.is_available():
+            return
+        try:
+            self.docker_client.images.prune()
+            logger.info("تم تنظيف الصور غير المستخدمة.")
+        except Exception as e:
+            logger.error(f"خطأ في تنظيف الصور: {e}")
 
 container_manager = ContainerManager()
 
-# ===================== دوال استضافة الملفات =====================
+# ===================== دوال استضافة الملفات (معدلة للعمل بالحاويات) =====================
 
 def start_hosted_bot(fid):
     f = db["files"].get(fid)
@@ -1545,20 +1536,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    user_dir = container_manager.get_user_dir(user_id)
-    if not is_path_inside(user_dir, original_path):
-        logger.error(f"ملف البوت خارج نطاق المستخدم: {original_path}")
-        f["status"] = "stopped"
-        save_db()
-        try:
-            bot.send_message(
-                int(user_id),
-                "❌ حدث خطأ في مسار ملف البوت، يرجى إعادة رفعه."
-            )
-        except:
-            pass
-        return
-
     container_name = container_manager.ensure_container(user_id)
     if not container_name:
         logger.error(f"فشل إنشاء حاوية للمستخدم {user_id}")
@@ -1566,25 +1543,10 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # فك التشفير إلى مجلد المستخدم نفسه إذا كان الملف مشفراً
     if original_path.endswith(".enc"):
-        temp_path = decrypt_file_to_temp(original_path, user_dir)
+        temp_path = decrypt_file_to_temp(original_path)
     else:
         temp_path = original_path
-
-    # التحقق من أن temp_path لا يزال ضمن النطاق
-    if not is_path_inside(user_dir, temp_path):
-        logger.error(f"ملف مؤقت خارج النطاق: {temp_path}")
-        f["status"] = "stopped"
-        save_db()
-        try:
-            bot.send_message(
-                int(user_id),
-                "❌ حدث خطأ في فك تشفير الملف، يرجى إعادة رفعه."
-            )
-        except:
-            pass
-        return
 
     file_size_mb = os.path.getsize(temp_path) // (1024 * 1024)
     if not container_manager.enforce_storage_limit(user_id, file_size_mb):
@@ -1600,8 +1562,7 @@ def start_hosted_bot(fid):
             pass
         return
 
-    safe_filename = os.path.basename(f['filename'])
-    container_filename = f"{fid}_{safe_filename}"
+    container_filename = f"{fid}_{f['filename']}"
     container_path = f"/app/files/{container_filename}"
     if not container_manager.copy_file_to_container(user_id, temp_path, container_path):
         logger.error(f"فشل نسخ الملف إلى حاوية المستخدم {user_id}")
@@ -1609,13 +1570,13 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # تثبيت المتطلبات
+    # ===== تثبيت المتطلبات: محاولة requirements.txt أولاً، ثم المكتبات المستوردة =====
     req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
     if not req_installed:
         logger.warning(f"فشل تثبيت المتطلبات من requirements.txt للمستخدم {user_id}، سنحاول تثبيت المكتبات المستوردة مباشرة.")
-    
+
     imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
-    
+
     if not req_installed and not imported_installed:
         logger.error(f"فشل تثبيت جميع المتطلبات للمستخدم {user_id}")
         f["status"] = "stopped"
@@ -1672,23 +1633,6 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # بعد نجاح التشغيل، نقوم بتشفير الملف الأصلي إذا لم يكن مشفراً
-    # ولكن يجب أن نحرص على عدم تشفير الملف المؤقت المستخدم للتشغيل
-    # الملف الأصلي هو original_path، ولكن قد يكون هو نفسه temp_path إذا لم يكن مشفراً
-    # ولكننا نريد تشفير الملف الأصلي (غير المشفر) بعد بدء التشغيل
-    if not original_path.endswith(".enc") and CRYPTO_AVAILABLE:
-        # نحتاج إلى تشفير الملف الأصلي (غير المشفر) الموجود في user_dir/files/
-        # ولكن قد يكون الملف الأصلي هو نفسه temp_path، أو قد يكون مختلفاً إذا كان temp_path من فك تشفير سابق
-        # ولكننا هنا في حالة original_path غير مشفر، فهو الملف الذي سيتم تشفيره
-        # نتحقق من أن الملف لا يزال موجوداً
-        if os.path.exists(original_path):
-            # نقوم بتشفير الملف وتحديث المسار
-            if encrypt_file(original_path):
-                new_path = original_path + ".enc"
-                f["path"] = new_path
-                save_db()
-                logger.info(f"تم تشفير الملف الأصلي بعد التشغيل الناجح: {original_path} -> {new_path}")
-
     running_processes[fid] = {
         "container_name": container_name,
         "pid": pid,
@@ -1703,7 +1647,6 @@ def start_hosted_bot(fid):
     f["last_started"] = now_iso()
     save_db()
     logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid})")
-
 
 def stop_hosted_bot(fid):
     f = db["files"].get(fid)
@@ -1726,7 +1669,6 @@ def stop_hosted_bot(fid):
         f["status"] = "stopped"
         f["pid"] = None
         save_db()
-
 
 def process_billing(fid, f):
     if not f:
@@ -1767,7 +1709,6 @@ def process_billing(fid, f):
         save_db()
         logger.warning(f"تم إعادة تعيين last_bill للبوت {fid} بسبب خطأ في التنسيق.")
 
-
 def billing_loop():
     while True:
         try:
@@ -1794,7 +1735,6 @@ def billing_loop():
                 process_billing(fid, f)
         except Exception as e:
             logger.error(f"خطأ في حلقة الفوترة: {e}")
-
 
 STORAGE_MONITOR_INTERVAL = 300
 
@@ -1829,6 +1769,18 @@ def monitor_storage_loop():
 
         except Exception as e:
             logger.error(f"خطأ في حلقة مراقبة المساحة: {e}")
+
+def cleanup_loop():
+    """حلقة تنظيف دورية للحاويات المتوقفة والملفات المؤقتة."""
+    while True:
+        try:
+            time.sleep(3600)  # كل ساعة
+            container_manager.cleanup_stopped_containers()
+            container_manager.cleanup_unused_images()
+            clean_temp_decrypted_files()
+            clean_orphaned_files()
+        except Exception as e:
+            logger.error(f"خطأ في حلقة التنظيف: {e}")
 
 # ===================== معالجات البوت =====================
 @bot.message_handler(commands=["start"])
@@ -1882,7 +1834,6 @@ def cmd_start(message):
         reply_markup=main_menu_kb(user_id),
     )
 
-
 @bot.message_handler(commands=["cancel"])
 def cmd_cancel(message):
     if is_user_banned(message.from_user.id):
@@ -1890,7 +1841,6 @@ def cmd_cancel(message):
         return
     pending_action.pop(message.from_user.id, None)
     reply_q(message, "❌ تم إلغاء العملية الحالية.")
-
 
 @bot.message_handler(content_types=["document"])
 def handle_document(message):
@@ -1903,37 +1853,6 @@ def handle_document(message):
         return
 
     action_data = pending_action.get(user_id, {})
-    
-    if action_data.get("action") == "awaiting_libs_file":
-        doc = message.document
-        if not doc.file_name.endswith(".txt"):
-            reply_q(message, "❌ الخاص يكون الملف بصيغة .txt فقط.")
-            return
-        
-        file_info = bot.get_file(doc.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        try:
-            content = downloaded.decode('utf-8')
-        except UnicodeDecodeError:
-            reply_q(message, "❌ الملف ليس نصياً صالحاً.")
-            return
-        
-        container_name = container_manager.ensure_container(str(user_id))
-        if not container_name:
-            reply_q(message, "❌ فشل إنشاء الحاوية لتثبيت المكتبات.")
-            pending_action.pop(user_id, None)
-            return
-        
-        msg = bot.send_message(message.chat.id, "⏳ جاري تثبيت المكتبات، يرجى الانتظار...")
-        success = container_manager.install_libraries_from_file(str(user_id), content)
-        if success:
-            bot.edit_message_text("✅ تم تثبيت جميع المكتبات بنجاح.", message.chat.id, msg.message_id)
-        else:
-            bot.edit_message_text("❌ فشل تثبيت بعض المكتبات. تأكد من صحة الأسماء.", message.chat.id, msg.message_id)
-        
-        pending_action.pop(user_id, None)
-        return
-
     if action_data.get("action") == "awaiting_file_update":
         fid = action_data.get("fid")
         if not fid or fid not in db["files"]:
@@ -1952,18 +1871,8 @@ def handle_document(message):
             os.remove(old_path)
         except Exception as e:
             logger.warning(f"فشل حذف الملف القديم {old_path}: {e}")
-
-        user_dir = container_manager.get_user_dir(str(user_id))
-        os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
-        safe_filename = os.path.basename(doc.file_name)
-        new_filename = f"{fid}_{safe_filename}"
-        new_path = safe_join(user_dir, "files", new_filename)
-
-        with open(new_path, "wb") as new_f:
+        with open(old_path, "wb") as new_f:
             new_f.write(downloaded)
-
-        # لا نقوم بتشفير الملف هنا، سيتم تشفيره بعد التشغيل الناجح
-        f["path"] = new_path
         f["filename"] = doc.file_name
         f["uploaded_at"] = now_iso()
         save_db()
@@ -1988,16 +1897,15 @@ def handle_document(message):
     file_info = bot.get_file(doc.file_id)
     downloaded = bot.download_file(file_info.file_path)
     fid = short_id()
-    user_dir = container_manager.get_user_dir(str(user_id))
-    os.makedirs(os.path.join(user_dir, "files"), exist_ok=True)
-    safe_filename = os.path.basename(doc.file_name)
-    filename = f"{fid}_{safe_filename}"
-    save_path = safe_join(user_dir, "files", filename)
-
+    save_path = os.path.join(UPLOADS_DIR, f"{fid}_{doc.file_name}")
     with open(save_path, "wb") as f:
         f.write(downloaded)
 
-    # لا نقوم بتشفير الملف هنا، سيتم تشفيره بعد التشغيل الناجح
+    if CRYPTO_AVAILABLE:
+        if encrypt_file(save_path):
+            save_path = save_path + ".enc"
+        else:
+            logger.warning("فشل تشفير الملف المرفوع، سيتم حفظه بدون تشفير.")
 
     db["files"][fid] = {
         "owner": str(user_id),
@@ -2047,7 +1955,6 @@ def handle_document(message):
             parse_mode="HTML",
         )
 
-
 def show_my_files(chat_id, user_id):
     user_files = {fid: f for fid, f in db["files"].items() if f["owner"] == str(user_id)}
     if not user_files:
@@ -2058,7 +1965,6 @@ def show_my_files(chat_id, user_id):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(f"📄 {esc(f['filename'])} - {status_text}", callback_data=f"file_detail_{fid}"))
         send_q(chat_id, f"📄 {esc(f['filename'])}", reply_markup=kb)
-
 
 def show_file_detail(chat_id, user_id, fid):
     f = db["files"].get(fid)
@@ -2093,7 +1999,6 @@ def show_file_detail(chat_id, user_id, fid):
 
     send_q(chat_id, info, reply_markup=kb)
 
-
 def show_file_log(chat_id, user_id, fid):
     f = db["files"].get(fid)
     if not f:
@@ -2120,7 +2025,6 @@ def show_file_log(chat_id, user_id, fid):
         logger.error(f"خطأ في قراءة السجل: {e}")
         send_q(chat_id, "❌ حدث خطأ أثناء قراءة السجل.")
 
-
 def change_file_token(chat_id, user_id, fid):
     f = db["files"].get(fid)
     if not f:
@@ -2129,13 +2033,8 @@ def change_file_token(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
-    user_dir = container_manager.get_user_dir(str(user_id))
-    if not is_path_inside(user_dir, f["path"]):
-        send_q(chat_id, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
-        return
     pending_action[user_id] = {"action": "awaiting_token_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل التوكن الجديد (مثال: <code>123456:ABC-DEF</code>):")
-
 
 def change_file_admin(chat_id, user_id, fid):
     f = db["files"].get(fid)
@@ -2145,13 +2044,8 @@ def change_file_admin(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
-    user_dir = container_manager.get_user_dir(str(user_id))
-    if not is_path_inside(user_dir, f["path"]):
-        send_q(chat_id, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
-        return
     pending_action[user_id] = {"action": "awaiting_admin_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل معرف الأدمن الجديد (رقم فقط):")
-
 
 def update_file_prompt(chat_id, user_id, fid):
     f = db["files"].get(fid)
@@ -2164,14 +2058,12 @@ def update_file_prompt(chat_id, user_id, fid):
     pending_action[user_id] = {"action": "awaiting_file_update", "fid": fid}
     send_q(chat_id, "📤 أرسل ملف البوت الجديد (بصيغة .py) ليتم استبداله مع الحفاظ على جميع البيانات.")
 
-
 def show_store(chat_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
     for item_id, item in db["store"].items():
         kb.add(types.InlineKeyboardButton(f"🛍️ {item['name']} - {item['price']}", callback_data=f"buy_{item_id}"))
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main", style="danger"))
     send_q(chat_id, "🛍️ اختر الباقة التي تناسبك من المتجر:", reply_markup=kb)
-
 
 def handle_buy(chat_id, user_id, item_id):
     item = db["store"].get(item_id)
@@ -2205,7 +2097,6 @@ def handle_buy(chat_id, user_id, item_id):
     send_admin_user_card(ADMIN_ID, user_id, admin_caption, reply_markup=kb)
     send_to_trust_channel(f"🛒 طلب شراء جديد من @{esc(username)}: {esc(item['name'])}")
 
-
 def show_account(chat_id, user_id):
     u = db["users"].get(str(user_id), {})
     n_files = len([f for f in db["files"].values() if f["owner"] == str(user_id)])
@@ -2218,7 +2109,6 @@ def show_account(chat_id, user_id):
         f"📅 تاريخ الانضمام: {esc(u.get('joined', '')[:10])}"
     )
     send_user_card(chat_id, user_id, caption)
-
 
 def handle_daily_gift(chat_id, user_id):
     u = db["users"][str(user_id)]
@@ -2239,7 +2129,7 @@ def handle_daily_gift(chat_id, user_id):
     save_db()
     send_q(chat_id, f"🎁 مبروك! تربحت {gift} نقطة. رصيدك الحالي ولى {u['points']} نقطة.")
 
-
+# ===== معالجة خطط VIP =====
 def show_vip_plans(chat_id):
     vips = db["settings"].get("vip_plans", [])
     if not vips:
@@ -2253,7 +2143,6 @@ def show_vip_plans(chat_id):
         ))
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main", style="danger"))
     send_q(chat_id, "💎 اختر باقة VIP المناسبة لك:", reply_markup=kb)
-
 
 def handle_vip_buy(chat_id, user_id, plan_idx):
     vips = db["settings"].get("vip_plans", [])
@@ -2300,7 +2189,6 @@ def handle_vip_buy(chat_id, user_id, plan_idx):
         f"الباقة: {esc(plan.get('name', ''))} - {esc(plan.get('price', ''))}"
     )
 
-
 def handle_vip_decision(chat_id, data):
     approve = data.startswith("approve_vip_")
     order_id = data[len("approve_vip_"):] if approve else data[len("reject_vip_"):]
@@ -2334,7 +2222,6 @@ def handle_vip_decision(chat_id, data):
         except Exception as e:
             logger.error(f"فشل إرسال إشعار رفض VIP للمستخدم {order['user']}: {e}")
     save_db()
-
 
 def handle_file_decision(chat_id, data):
     approve = data.startswith("approve_file_")
@@ -2388,7 +2275,6 @@ def handle_file_decision(chat_id, data):
         except Exception as e:
             logger.error(f"فشل إرسال إشعار الرفض للمستخدم {f['owner']}: {e}")
 
-
 def handle_file_action(chat_id, user_id, data):
     if data.startswith("stop_file_"):
         fid, act = data[len("stop_file_"):], "stop"
@@ -2418,22 +2304,13 @@ def handle_file_action(chat_id, user_id, data):
         send_q(chat_id, "▶️ جاري تشغيل البوت في الخلفية.")
     else:
         stop_hosted_bot(fid)
-        user_dir = container_manager.get_user_dir(str(user_id))
-        if is_path_inside(user_dir, f["path"]):
-            try:
-                os.remove(f["path"])
-            except Exception as e:
-                logger.error(f"فشل حذف الملف {f['path']}: {e}")
-        else:
-            logger.warning(f"محاولة حذف ملف خارج النطاق: {f['path']}")
+        try:
+            os.remove(f["path"])
+        except Exception as e:
+            logger.error(f"فشل حذف الملف {f['path']}: {e}")
         db["files"].pop(fid, None)
         save_db()
         send_q(chat_id, "🗑️ تم حذف الملف نهائياً.")
-        user_id_str = str(user_id)
-        remaining = [f for f in db["files"].values() if f["owner"] == user_id_str]
-        if not remaining:
-            container_manager.cleanup_user_container(user_id_str)
-
 
 def handle_order_decision(chat_id, data):
     approve = data.startswith("approve_order_")
@@ -2468,7 +2345,6 @@ def handle_order_decision(chat_id, data):
         except Exception as e:
             logger.error(f"فشل إرسال إشعار رفض الطلب للمستخدم {order['user']}: {e}")
     save_db()
-
 
 def handle_admin_callback(chat_id, user_id, data):
     if data == "admin_upload_requests":
@@ -2593,7 +2469,8 @@ def handle_admin_callback(chat_id, user_id, data):
                 f"🎁 الخطة المجانية: {'مفعلة ✅' if s['free_plan'] else 'معطلة ❌'}\n"
                 f"💎 نقاط البداية: {s['free_points']}\n"
                 f"🎁 الهدية اليومية: {s['daily_gift']}\n"
-                f"🔗 مكافأة الإحالة: {s['referral_bonus']}"
+                f"🔗 مكافأة الإحالة: {s['referral_bonus']}\n"
+                f"📦 الحد الأقصى للنسخ الاحتياطي: {s.get('max_backups', 200)}"
             ),
         )
 
@@ -2836,6 +2713,10 @@ def handle_admin_callback(chat_id, user_id, data):
         pending_action[user_id] = {"action": "awaiting_vip_plan"}
         send_q(chat_id, "➕ أرسل بيانات خطة VIP بهذا الشكل:\n<code>الاسم|السعر|عدد النقاط</code>\nمثال: VIP شهري|50 درهم|500")
 
+    elif data == "admin_backup_settings":
+        current = db["settings"].get("max_backups", 200)
+        pending_action[user_id] = {"action": "awaiting_max_backups"}
+        send_q(chat_id, f"📦 الحد الأقصى لعدد النسخ الاحتياطية: {current}\nأرسل الرقم الجديد (عدد صحيح):")
 
 def show_users_page(chat_id, user_id, page):
     users = list(db["users"].items())
@@ -2856,7 +2737,6 @@ def show_users_page(chat_id, user_id, page):
         kb.add(types.InlineKeyboardButton("➡️ التالي", callback_data=f"users_page_{page+1}", style="danger"))
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel", style="primary"))
     send_q(chat_id, text, reply_markup=kb)
-
 
 # ===================== دوال الـ Callback =====================
 @bot.callback_query_handler(func=lambda call: True)
@@ -2988,10 +2868,6 @@ def callback_router(call):
             pending_action[user_id] = {"action": "awaiting_question"}
             send_q(chat_id, "💬 اكتب سؤالك الآن وسيصل مباشرة إلى الإدارة.")
 
-        elif data == "install_libs":
-            pending_action[user_id] = {"action": "awaiting_libs_file"}
-            send_q(chat_id, "📤 أرسل ملف نصي (txt) يحتوي على أسماء المكتبات المراد تثبيتها، سطر لكل مكتبة.\nمثال:\n<code>requests\ntelebot\nnumpy</code>")
-
         elif data == "admin_panel" and is_admin(user_id):
             edit_q("🛡️ <b>لوحة الإدارة</b>", chat_id, call.message.message_id, reply_markup=admin_menu_kb())
 
@@ -3049,7 +2925,6 @@ def callback_router(call):
             bot.send_message(chat_id, "حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى.")
         except:
             pass
-
 
 # ===================== دوال الرسائل النصية المعلقة =====================
 @bot.message_handler(func=lambda m: m.from_user.id in pending_action, content_types=["text"])
@@ -3286,6 +3161,18 @@ def handle_pending_text(message):
                 logger.error(f"خطأ في إضافة خطة VIP: {e}")
                 reply_q(message, "❌ حدث خطأ.")
 
+        elif action == "awaiting_max_backups" and is_admin(user_id):
+            try:
+                new_val = int(message.text.strip())
+                if new_val < 1:
+                    reply_q(message, "❌ يجب أن يكون الرقم أكبر من 0.")
+                    return
+                db["settings"]["max_backups"] = new_val
+                save_db()
+                reply_q(message, f"✅ تم تحديث الحد الأقصى للنسخ الاحتياطية إلى {new_val}.")
+            except ValueError:
+                reply_q(message, "❌ يجب إدخال رقم صحيح.")
+
         elif action == "awaiting_token_change":
             fid = pending_action[user_id].get("fid")
             if not fid or fid not in db["files"]:
@@ -3295,11 +3182,6 @@ def handle_pending_text(message):
             f = db["files"][fid]
             if str(user_id) != f["owner"] and not is_admin(user_id):
                 reply_q(message, "🔒 ماعندكش الصلاحية.")
-                pending_action.pop(user_id, None)
-                return
-            user_dir = container_manager.get_user_dir(str(user_id))
-            if not is_path_inside(user_dir, f["path"]):
-                reply_q(message, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
                 pending_action.pop(user_id, None)
                 return
             new_token = message.text.strip()
@@ -3328,11 +3210,6 @@ def handle_pending_text(message):
             f = db["files"][fid]
             if str(user_id) != f["owner"] and not is_admin(user_id):
                 reply_q(message, "🔒 ماعندكش الصلاحية.")
-                pending_action.pop(user_id, None)
-                return
-            user_dir = container_manager.get_user_dir(str(user_id))
-            if not is_path_inside(user_dir, f["path"]):
-                reply_q(message, "❌ مسار الملف غير آمن، يرجى إعادة رفع الملف.")
                 pending_action.pop(user_id, None)
                 return
             new_admin = message.text.strip()
@@ -3398,7 +3275,6 @@ def handle_pending_text(message):
         reply_q(message, "حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى.")
         pending_action.pop(user_id, None)
 
-
 @bot.message_handler(content_types=["photo", "document"])
 def handle_photo_for_welcome(message):
     user_id = message.from_user.id
@@ -3419,7 +3295,6 @@ def handle_photo_for_welcome(message):
         except Exception as e:
             logger.error(f"خطأ في استقبال الصورة الترحيبية: {e}")
             reply_q(message, "❌ حدث خطأ أثناء حفظ الصورة.")
-
 
 # ===================== الميزات الجديدة =====================
 
@@ -3464,7 +3339,6 @@ def cmd_sendmsg(message):
         logger.error(f"خطأ في أمر sendmsg: {e}")
         reply_q(message, "❌ حدث خطأ أثناء معالجة الأمر.")
 
-
 @bot.message_handler(func=lambda m: m.reply_to_message is not None and m.reply_to_message.message_id in question_messages, content_types=["text"])
 def handle_reply_to_question(message):
     if not is_admin(message.from_user.id):
@@ -3484,7 +3358,6 @@ def handle_reply_to_question(message):
     except Exception as e:
         logger.error(f"فشل إرسال رد الإدارة للمستخدم {user_id}: {e}")
         reply_q(message, f"❌ فشل إرسال الرد: {e}")
-
 
 @bot.message_handler(commands=['stats', 'status'])
 def cmd_stats(message):
@@ -3514,7 +3387,6 @@ def cmd_stats(message):
     )
     send_q(message.chat.id, stats_text)
 
-
 # ===================== التشغيل =====================
 if __name__ == "__main__":
     clean_temp_decrypted_files()
@@ -3525,5 +3397,6 @@ if __name__ == "__main__":
     threading.Thread(target=billing_loop, daemon=True).start()
     threading.Thread(target=auto_backup, daemon=True).start()
     threading.Thread(target=monitor_storage_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
     logger.info("🤖 البوت شغال...")
     bot.infinity_polling(skip_pending=True)
