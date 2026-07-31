@@ -1090,15 +1090,20 @@ def get_python_version_in_container(container_manager, user_id):
     return "3.11"  # افتراضي
 
 def install_package_with_retries(container_manager, user_id, package_name, install_name=None, retries=3):
-    """محاولة تثبيت حزمة مع عدة محاولات وأسماء بديلة."""
+    """محاولة تثبيت حزمة مع عدة محاولات وأسماء بديلة، مع استخدام --user و PYTHONUSERBASE."""
     if install_name is None:
         install_name = package_name
 
+    # تأكد من وجود دليل .local
+    container_manager.ensure_user_dir(user_id)  # هذا يؤكد وجود /app/user_id/... لكننا نريد /app/.local داخل الحاوية
+    # بدلاً من ذلك، نقوم بإنشاء /app/.local عن بعد باستخدام أمر
+    container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
+
     for attempt in range(1, retries + 1):
         try:
-            # حاول التثبيت مع --no-cache-dir و --upgrade إذا كان المحاولة الأخيرة
             upgrade_flag = " --upgrade" if attempt == retries else ""
-            cmd = f"pip install {install_name}{upgrade_flag} --no-cache-dir"
+            # تعيين PYTHONUSERBASE و استخدام --user
+            cmd = f"PYTHONUSERBASE=/app/.local pip install --user {install_name}{upgrade_flag} --no-cache-dir"
             logger.info(f"محاولة {attempt}/{retries} تثبيت {install_name} (المطلوب: {package_name})")
             output = container_manager.run_command_in_container(user_id, cmd, detach=False)
             if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
@@ -1108,11 +1113,10 @@ def install_package_with_retries(container_manager, user_id, package_name, insta
                 logger.warning(f"فشل تثبيت {install_name} في المحاولة {attempt}: {output}")
                 # جرب اسم بديل إذا كان موجوداً
                 if attempt == 1 and install_name != package_name:
-                    # جرب اسم الحزمة الأصلي إذا كنا نستخدم اسم بديل
                     alt_name = package_name
                     if alt_name != install_name:
                         logger.info(f"محاولة التثبيت بالاسم الأصلي: {alt_name}")
-                        cmd2 = f"pip install {alt_name} --no-cache-dir"
+                        cmd2 = f"PYTHONUSERBASE=/app/.local pip install --user {alt_name} --no-cache-dir"
                         output2 = container_manager.run_command_in_container(user_id, cmd2, detach=False)
                         if output2 and ("Successfully installed" in output2 or "Requirement already satisfied" in output2):
                             logger.info(f"✅ تم تثبيت {alt_name} بنجاح.")
@@ -1136,8 +1140,11 @@ def install_requirements_in_container(container_manager, user_id, file_path) -> 
         logger.error(f"فشل نسخ requirements.txt إلى حاوية المستخدم {user_id}")
         return False
 
+    # تأكد من وجود دليل .local
+    container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
+
     # محاولة تثبيت باستخدام الملف كاملاً
-    cmd = f"pip install -r /app/files/requirements.txt --no-cache-dir"
+    cmd = f"PYTHONUSERBASE=/app/.local pip install --user -r /app/files/requirements.txt --no-cache-dir"
     output = container_manager.run_command_in_container(user_id, cmd, detach=False)
     if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
         logger.info(f"تم تثبيت المتطلبات من requirements.txt للمستخدم {user_id}")
@@ -1151,7 +1158,6 @@ def install_requirements_in_container(container_manager, user_id, file_path) -> 
             # استخراج أسماء الحزم
             packages = []
             for line in lines:
-                # استخراج اسم الحزمة (أول جزء قبل أي علامة = أو > أو <)
                 pkg_name = re.split(r'[=<>!]', line)[0].strip()
                 if pkg_name:
                     packages.append(pkg_name)
@@ -1190,11 +1196,14 @@ def install_imported_requirements(container_manager, user_id, file_path) -> bool
 
     logger.info(f"سيتم تثبيت المكتبات التالية داخل الحاوية: {external_packages}")
 
+    # تأكد من وجود دليل .local
+    container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
+
     failed = []
     for pkg in external_packages:
         install_name = PACKAGE_ALIASES.get(pkg, pkg)
-        # تحقق مما إذا كانت مثبتة بالفعل
-        check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
+        # تحقق مما إذا كانت مثبتة بالفعل (مع مراعاة PYTHONUSERBASE)
+        check_cmd = f"PYTHONUSERBASE=/app/.local python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
         check_output = container_manager.run_command_in_container(user_id, check_cmd, detach=False)
         if check_output and "installed" in check_output:
             logger.info(f"المكتبة {pkg} مثبتة بالفعل في الحاوية، تخطي.")
@@ -1410,6 +1419,7 @@ class ContainerManager:
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
         """
         تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
+        مع ضبط PYTHONPATH ليشمل مكتبات المستخدم المثبتة في /app/.local
         """
         if not self.is_available():
             return None, None
@@ -1417,9 +1427,15 @@ class ContainerManager:
         try:
             container = self.docker_client.containers.get(container_name)
 
+            # إعداد متغيرات البيئة لتشغيل البوت: PYTHONPATH و PYTHONUSERBASE
+            # نكتشف إصدار بايثون ديناميكياً لإضافة المسار الصحيح
+            version = get_python_version_in_container(self, user_id)
+            python_path = f"/app/.local/lib/python{version}/site-packages"
+            env_vars = f"PYTHONUSERBASE=/app/.local PYTHONPATH={python_path}:$PYTHONPATH"
+
             log_file = f"/app/logs/{fid}.log"
             pid_file = f"/app/logs/{fid}.pid"
-            full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
+            full_cmd = f"{env_vars} {base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
             result = container.exec_run(
@@ -1493,9 +1509,7 @@ class ContainerManager:
         try:
             containers = self.docker_client.containers.list(all=True, filters={"status": "exited"})
             for container in containers:
-                # تجنب حذف الحاويات التي ما زالت مستخدمة
                 if container.name.startswith("user_"):
-                    # نتحقق إذا كانت الحاوية لا تزال في قاعدة البيانات
                     user_id = container.name.split("_")[1]
                     if not any(f["owner"] == user_id for f in db["files"].values()):
                         container.remove()
