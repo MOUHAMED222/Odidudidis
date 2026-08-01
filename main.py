@@ -1948,15 +1948,20 @@ def _find_high_entropy_strings(tree: "ast.AST"):
     """
     كشف سترينجات طويلة عشوائية الشكل جوه الكود حتى لو مفيش كلمة base64 صريحة -
     نمط شائع في تعمية الـ payload الخبيث يدويًا أو بأدوات تشفير مخصصة.
+    تم رفع عتبات الكشف لتقليل النتائج الإيجابية الخاطئة:
+    - الطول الأدنى: 100 حرف (كان 60)
+    - الإنتروبيا الدنيا: 6.5 (كان 5.2)
     """
     findings = []
+    MIN_LENGTH = 100   # تم الرفع من 60 إلى 100
+    MIN_ENTROPY = 6.5  # تم الرفع من 5.2 إلى 6.5
     for node in ast.walk(tree):
         value = None
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
-        if value and len(value) >= 60:
+        if value and len(value) >= MIN_LENGTH:
             entropy = _shannon_entropy(value)
-            if entropy >= 5.2:
+            if entropy >= MIN_ENTROPY:
                 findings.append(
                     f"سترينج طويل عشوائي الشكل (إنتروبيا {entropy:.1f}) بطول {len(value)} حرف - مؤشر تعمية/payload مخفي"
                 )
